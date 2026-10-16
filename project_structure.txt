@@ -1,0 +1,269 @@
+Folder PATH listing
+Volume serial number is 000000CA E6DF:E743
+C:\USERS\EVEE\ETHICAL-LENDING\APP
++---Console
+|   \---Commands
+|           CalculateEclProvisionsCommand.php
+|           CheckInDuplumCapsCommand.php
+|           ExportRegulatoryReturnsCommand.php
+|           GenerateCoreBankingModels.php
+|           ProcessFairCollectionsCommand.php
+|           PublishOutboxEventsCommand.php
+|           SimulateMpesaTransactionCommand.php
+|           
++---Enums
+|       LoanStatus.php
+|       RiskBand.php
+|       VerificationStatus.php
+|       
++---Exceptions
+|   \---Fintech
+|           AccountingPeriodClosedException.php
+|           DataProtectionConsentMissingException.php
+|           DuplicateWebhookException.php
+|           InDuplumCapExceededException.php
+|           InvalidPaymentAmountException.php
+|           MpesaAuthenticationException.php
+|           OutsideLegalOutreachHoursException.php
+|           RegulatoryCooldownActiveException.php
+|           RestructuringNotEligibleException.php
+|           SimSwapRiskDetectedException.php
+|           UnbalancedJournalEntryException.php
+|           
++---Http
+|   +---Controllers
+|   |       ContractVerificationController.php
+|   |       Controller.php
+|   |       MpesaWebhookController.php
+|   |       UssdController.php
+|   |       
+|   +---Middleware
+|   |       EnforceMakerChecker.php
+|   |       
+|   \---Requests
+|           BorrowerRegistrationRequest.php
+|           
++---Jobs
+|       DispatchMpesaB2cDisbursementJob.php
+|       ProcessMpesaCallbackJob.php
+|       ProcessMpesaStatementJob.php
+|       
++---Models
+|       AccountingPeriod.php
+|       AmortizationSchedule.php
+|       AuditTrail.php
+|       Borrower.php
+|       BorrowerFinancialProfile.php
+|       BorrowerKycDocument.php
+|       BorrowerOptOut.php
+|       CbkRegulatoryReturn.php
+|       ChartOfAccount.php
+|       CollectionAction.php
+|       CollectionCase.php
+|       CrbDisputeLock.php
+|       CrbInquiryRecord.php
+|       CrbReportExport.php
+|       CrbSubmissionLog.php
+|       CreditRuleEvaluation.php
+|       DataProtectionConsent.php
+|       EclProvision.php
+|       FeeMatrix.php
+|       Guarantor.php
+|       Ifrs9LoanStage.php
+|       InDuplumTracking.php
+|       InvestorFacility.php
+|       JournalEntry.php
+|       JournalItem.php
+|       LedgerAdjustment.php
+|       Loan.php
+|       LoanApplication.php
+|       LoanLedgerEntry.php
+|       LoanLegalContract.php
+|       LoanProduct.php
+|       LoanWriteOff.php
+|       MakerCheckerRequest.php
+|       MpesaApiToken.php
+|       MpesaB2cDisbursement.php
+|       MpesaC2bCallback.php
+|       MpesaStatementUpload.php
+|       MpesaStkRequest.php
+|       OutboxEvent.php
+|       PaymentWaterfallLog.php
+|       PenaltyPolicy.php
+|       ProductInterestRule.php
+|       PromiseToPay.php
+|       ReconciliationBatch.php
+|       RegulatoryCooldownLock.php
+|       RestructuringProposal.php
+|       RestructuringSchedule.php
+|       TaxWithholdingLedger.php
+|       User.php
+|       UssdSession.php
+|       WebhookIdempotencyKey.php
+|       
++---Providers
+|       AppServiceProvider.php
+|       
+\---Services
+    +---Analytics
+    |       Ifrs9ProvisioningService.php
+    |       
+    +---Compliance
+    |       CbkStatutoryReturnService.php
+    |       CrbMetro2ExporterService.php
+    |       
+    +---Customer
+    |       BorrowerOnboardingService.php
+    |       
+    +---Financial
+    |   |   GeneralLedgerService.php
+    |   |   InDuplumEnforcementService.php
+    |   |   LoanLedgerService.php
+    |   |   PaymentWaterfallService.php
+    |   |   TransactionalOutboxService.php
+    |   |   
+    |   \---Mpesa
+    |           B2cDisbursementService.php
+    |           DarajaClient.php
+    |           MpesaSimulationHarness.php
+    |           MpesaWebhookService.php
+    |           SimSwapProtectionService.php
+    |           
+    +---Governance
+    |       MakerCheckerService.php
+    |       
+    +---Omnichannel
+    |       UssdMenuEngine.php
+    |       
+    +---Servicing
+    |       ContractGeneratorService.php
+    |       FairCollectionsService.php
+    |       RestructuringEngine.php
+    |       
+    \---Underwriting
+            CreditUnderwritingEngine.php
+            MpesaStatementParserService.php
+            
+Folder PATH listing
+Volume serial number is 00000033 E6DF:E743
+C:\USERS\EVEE\ETHICAL-LENDING\DATABASE
+|   .gitignore
+|   database.sqlite
+|   
++---factories
+|       UserFactory.php
+|       
++---migrations
+|       0001_01_01_000001_create_cache_table.php
+|       0001_01_01_000002_create_jobs_table.php
+|       2026_10_05_145739_create_permission_tables.php
+|       2026_10_05_153348_create_users_table.php
+|       2026_10_05_153351_create_borrowers_table.php
+|       2026_10_05_153353_create_borrower_kyc_documents_table.php
+|       2026_10_05_153354_create_borrower_financial_profiles_table.php
+|       2026_10_05_153356_create_guarantors_table.php
+|       2026_10_05_153357_create_crb_inquiry_records_table.php
+|       2026_10_05_153358_create_loan_products_table.php
+|       2026_10_05_153359_create_product_interest_rules_table.php
+|       2026_10_05_153401_create_fee_matrices_table.php
+|       2026_10_05_153403_create_penalty_policies_table.php
+|       2026_10_05_153404_create_loan_applications_table.php
+|       2026_10_05_153405_create_credit_rule_evaluations_table.php
+|       2026_10_05_153407_create_loans_table.php
+|       2026_10_05_153408_create_amortization_schedules_table.php
+|       2026_10_05_153411_create_loan_ledger_entries_table.php
+|       2026_10_05_153413_create_in_duplum_tracking_table.php
+|       2026_10_05_153414_create_restructuring_proposals_table.php
+|       2026_10_05_162432_create_restructuring_schedules_table.php
+|       2026_10_05_162500_create_payment_waterfall_logs_table.php
+|       2026_10_05_174724_create_chart_of_accounts_table.php
+|       2026_10_05_174725_create_accounting_periods_table.php
+|       2026_10_05_174725_create_journal_entries_table.php
+|       2026_10_05_174726_create_journal_items_table.php
+|       2026_10_05_174727_create_mpesa_api_tokens_table.php
+|       2026_10_05_174727_create_tax_withholding_ledgers_table.php
+|       2026_10_05_174728_create_mpesa_b2c_disbursements_table.php
+|       2026_10_05_174728_create_mpesa_c2b_callbacks_table.php
+|       2026_10_05_174729_create_mpesa_stk_requests_table.php
+|       2026_10_05_174730_create_collection_cases_table.php
+|       2026_10_05_174730_create_reconciliation_batches_table.php
+|       2026_10_05_174731_create_collection_actions_table.php
+|       2026_10_05_174732_create_promise_to_pays_table.php
+|       2026_10_05_174732_create_regulatory_cooldown_locks_table.php
+|       2026_10_05_174733_create_data_protection_consents_table.php
+|       2026_10_05_174734_create_ecl_provisions_table.php
+|       2026_10_05_174734_create_ifrs9_loan_stages_table.php
+|       2026_10_05_174735_create_crb_submission_logs_table.php
+|       2026_10_05_174736_create_maker_checker_requests_table.php
+|       2026_10_05_174750_create_audit_trails_table.php
+|       2026_10_05_184445_create_mpesa_statement_uploads_table.php
+|       2026_10_05_184446_create_ussd_sessions_table.php
+|       2026_10_05_184447_create_outbox_events_table.php
+|       2026_10_05_184448_create_investor_facilities_table.php
+|       2026_10_05_184449_create_loan_legal_contracts_table.php
+|       2026_10_05_184450_create_loan_write_offs_table.php
+|       2026_10_05_184451_create_ledger_adjustments_table.php
+|       2026_10_05_184451_create_webhook_idempotency_keys_table.php
+|       2026_10_05_184452_create_borrower_opt_outs_table.php
+|       2026_10_05_184452_create_crb_dispute_locks_table.php
+|       2026_10_16_212812_create_cbk_regulatory_returns_table.php
+|       2026_10_16_214638_create_crb_report_exports_table.php
+|       
+\---seeders
+        DatabaseSeeder.php
+        
+Folder PATH listing
+Volume serial number is 00000097 E6DF:E743
+C:\USERS\EVEE\ETHICAL-LENDING\ROUTES
+    api.php
+    console.php
+    web.php
+    
+No subfolders exist 
+
+Folder PATH listing
+Volume serial number is 000000CB E6DF:E743
+C:\USERS\EVEE\ETHICAL-LENDING\TESTS
+|   TestCase.php
+|   
++---Feature
+|       B2cDisbursementTest.php
+|       BorrowerOnboardingTest.php
+|       ContractGeneratorTest.php
+|       CreditUnderwritingEngineTest.php
+|       DarajaAuthTest.php
+|       ExampleTest.php
+|       FairCollectionsTest.php
+|       GeneralLedgerTest.php
+|       Ifrs9ProvisioningTest.php
+|       InDuplumEnforcementTest.php
+|       LoanLedgerServiceTest.php
+|       MakerCheckerServiceTest.php
+|       MpesaSimulationTest.php
+|       MpesaStatementParserTest.php
+|       MpesaWebhookTest.php
+|       PaymentWaterfallTest.php
+|       RegulatoryReturnsTest.php
+|       RestructuringEngineTest.php
+|       TransactionalOutboxTest.php
+|       UssdMenuTest.php
+|       
+\---Unit
+        ExampleTest.php
+        
+Folder PATH listing
+Volume serial number is 0000003B E6DF:E743
+C:\USERS\EVEE\ETHICAL-LENDING\RESOURCES
++---css
+|       app.css
+|       
++---js
+|       app.js
+|       bootstrap.js
+|       
+\---views
+    |   welcome.blade.php
+    |   
+    \---pdf
+            loan-contract.blade.php
+            
