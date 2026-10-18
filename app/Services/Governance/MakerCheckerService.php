@@ -61,8 +61,9 @@ final class MakerCheckerService
                 throw new RuntimeException("Maker-Checker Request #{$requestId} is not in pending status.");
             }
 
-            // Dual-Control Requirement: Checker MUST NOT be the Maker
-            if ($request->maker_user_id === $checkerUserId) {
+            // Dual-Control Requirement: Checker MUST NOT be the Maker.
+            // Compared as integers so a driver that returns ids as strings cannot slip past the check.
+            if ((int) $request->maker_user_id === $checkerUserId) {
                 Log::channel('fintech')->warning("Dual-Control Violation Attempt: User #{$checkerUserId} attempted self-approval on Request #{$requestId}");
                 throw new RuntimeException("Dual-Control Violation: You cannot authorize a request you initiated.");
             }
@@ -110,7 +111,7 @@ final class MakerCheckerService
     }
 
     /**
-     * Rejects a pending dual-control request.
+     * Rejects a pending dual-control request and records the decision on the audit trail.
      */
     public function rejectRequest(int $requestId, int $checkerUserId, string $reason): array
     {
@@ -124,7 +125,8 @@ final class MakerCheckerService
                 throw new RuntimeException("Maker-Checker Request #{$requestId} is not in pending status.");
             }
 
-            if ($request->maker_user_id === $checkerUserId) {
+            if ((int) $request->maker_user_id === $checkerUserId) {
+                Log::channel('fintech')->warning("Dual-Control Violation Attempt: User #{$checkerUserId} attempted to reject own Request #{$requestId}");
                 throw new RuntimeException("Dual-Control Violation: You cannot reject/action a request you initiated.");
             }
 
@@ -134,6 +136,24 @@ final class MakerCheckerService
                 'checker_notes' => $reason,
                 'actioned_at' => now(),
             ]);
+
+            AuditTrail::create([
+                'user_id' => $checkerUserId,
+                'action' => 'MAKER_CHECKER_REJECTED',
+                'auditable_type' => MakerCheckerRequest::class,
+                'auditable_id' => $request->id,
+                'old_values' => ['status' => 'pending'],
+                'new_values' => [
+                    'status' => 'rejected',
+                    'action_type' => $request->action_type,
+                    'checker_user_id' => $checkerUserId,
+                    'reason' => $reason,
+                ],
+                'ip_address' => request()->ip() ?? '127.0.0.1',
+                'user_agent' => request()->userAgent() ?? 'SYSTEM',
+            ]);
+
+            Log::channel('fintech')->info("Maker-Checker Request #{$requestId} [{$request->action_type}] rejected by Checker #{$checkerUserId}");
 
             return [
                 'request_id' => $request->id,

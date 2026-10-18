@@ -1,11 +1,26 @@
-@import 'tailwindcss';
-
-@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
-@source '../../storage/framework/views/*.php';
-@source '../**/*.blade.php';
-@source '../**/*.js';
+@import "tailwindcss";
 
 @theme {
-    --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
-        'Segoe UI Symbol', 'Noto Color Emoji';
+    /* System fonts: no downloads, fast on mobile data. */
+    --font-sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+    /* Brand: deep forest green. Change these to re-theme everything. */
+    --color-brand-50: #eef6f1;
+    --color-brand-100: #d7eadf;
+    --color-brand-500: #2e8b62;
+    --color-brand-600: #1f7a52;
+    --color-brand-700: #0f5132;
+    --color-brand-900: #0b2a1f;
+
+    /* Surfaces and text */
+    --color-paper: #f6f7f4;
+    --color-ink: #16241e;
+    --color-line: #dde3dd;
+    --color-muted: #5b6b63;
+        --text-2xs: 0.6875rem;
+    --text-3xs: 0.625rem;
+}
+
+[x-cloak] {
+    display: none !important;
 }

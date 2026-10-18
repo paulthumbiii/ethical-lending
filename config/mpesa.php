@@ -28,6 +28,16 @@ return [
     'shortcode'     => env('MPESA_SHORTCODE', '174379'),
     'b2c_shortcode' => env('MPESA_B2C_SHORTCODE', '600000'),
 
+        /*
+    |--------------------------------------------------------------------------
+    | STK Push Callback URL
+    |--------------------------------------------------------------------------
+    | Public HTTPS address Safaricom calls with the result of a payment prompt.
+    | It must point to POST /api/v1/mpesa/stk-callback on your public domain.
+    | For local testing, use a tunnel such as ngrok.
+    */
+    'stk_callback_url' => env('MPESA_STK_CALLBACK_URL', ''),
+
     /*
     |--------------------------------------------------------------------------
     | Gateway Base Endpoints

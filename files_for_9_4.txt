@@ -1,0 +1,1016 @@
+===== app\Services\Governance\MakerCheckerService.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Governance;
+
+use App\Models\AuditTrail;
+use App\Models\LoanApplication;
+use App\Models\MakerCheckerRequest;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use RuntimeException;
+
+final class MakerCheckerService
+{
+    /**
+     * Creates a pending dual-control authorization request.
+     *
+     * @param int $makerUserId
+     * @string $actionType (e.g., 'APPROVE_LOAN_DISBURSEMENT', 'WAIVE_INTEREST')
+     * @string $targetEntityType
+     * @int $targetEntityId
+     * @array $payload
+     * @return MakerCheckerRequest
+     */
+    public function createPendingRequest(
+        int $makerUserId,
+        string $actionType,
+        string $targetEntityType,
+        int $targetEntityId,
+        array $payload = []
+    ): MakerCheckerRequest {
+        return MakerCheckerRequest::create([
+            'maker_user_id' => $makerUserId,
+            'action_type' => $actionType,
+            'target_entity_type' => $targetEntityType,
+            'target_entity_id' => $targetEntityId,
+            'payload' => $payload,
+            'status' => 'pending',
+        ]);
+    }
+
+    /**
+     * Authorizes and executes a pending request under strict non-self-approval enforcement.
+     *
+     * @param int $requestId
+     * @param int $checkerUserId
+     * @param string|null $checkerNotes
+     * @return array
+     * @throws RuntimeException
+     */
+    public function authorizeRequest(int $requestId, int $checkerUserId, ?string $checkerNotes = null): array
+    {
+        return DB::transaction(function () use ($requestId, $checkerUserId, $checkerNotes) {
+            /** @var MakerCheckerRequest $request */
+            $request = MakerCheckerRequest::where('id', $requestId)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            if ($request->status !== 'pending') {
+                throw new RuntimeException("Maker-Checker Request #{$requestId} is not in pending status.");
+            }
+
+            // Dual-Control Requirement: Checker MUST NOT be the Maker
+            if ($request->maker_user_id === $checkerUserId) {
+                Log::channel('fintech')->warning("Dual-Control Violation Attempt: User #{$checkerUserId} attempted self-approval on Request #{$requestId}");
+                throw new RuntimeException("Dual-Control Violation: You cannot authorize a request you initiated.");
+            }
+
+            $request->update([
+                'status' => 'approved',
+                'checker_user_id' => $checkerUserId,
+                'checker_notes' => $checkerNotes,
+                'actioned_at' => now(),
+            ]);
+
+            // Execute specific state mutation based on action type
+            if ($request->action_type === 'APPROVE_LOAN_APPLICATION') {
+                /** @var LoanApplication|null $app */
+                $app = LoanApplication::where('id', $request->target_entity_id)->first();
+                if ($app) {
+                    $app->update(['status' => 'approved']);
+                }
+            }
+
+            // Record immutable Audit Trail
+            AuditTrail::create([
+                'user_id' => $checkerUserId,
+                'action' => 'MAKER_CHECKER_AUTHORIZED',
+                'auditable_type' => MakerCheckerRequest::class,
+                'auditable_id' => $request->id,
+                'old_values' => ['status' => 'pending'],
+                'new_values' => [
+                    'status' => 'approved',
+                    'action_type' => $request->action_type,
+                    'checker_user_id' => $checkerUserId,
+                ],
+                'ip_address' => request()->ip() ?? '127.0.0.1',
+                'user_agent' => request()->userAgent() ?? 'SYSTEM',
+            ]);
+
+            Log::channel('fintech')->info("Maker-Checker Request #{$requestId} [{$request->action_type}] authorized by Checker #{$checkerUserId}");
+
+            return [
+                'request_id' => $request->id,
+                'action_type' => $request->action_type,
+                'status' => 'approved',
+            ];
+        });
+    }
+
+    /**
+     * Rejects a pending dual-control request.
+     */
+    public function rejectRequest(int $requestId, int $checkerUserId, string $reason): array
+    {
+        return DB::transaction(function () use ($requestId, $checkerUserId, $reason) {
+            /** @var MakerCheckerRequest $request */
+            $request = MakerCheckerRequest::where('id', $requestId)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            if ($request->status !== 'pending') {
+                throw new RuntimeException("Maker-Checker Request #{$requestId} is not in pending status.");
+            }
+
+            if ($request->maker_user_id === $checkerUserId) {
+                throw new RuntimeException("Dual-Control Violation: You cannot reject/action a request you initiated.");
+            }
+
+            $request->update([
+                'status' => 'rejected',
+                'checker_user_id' => $checkerUserId,
+                'checker_notes' => $reason,
+                'actioned_at' => now(),
+            ]);
+
+            return [
+                'request_id' => $request->id,
+                'status' => 'rejected',
+            ];
+        });
+    }
+}===== app\Services\Servicing\FairCollectionsService.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Servicing;
+
+use App\Enums\LoanStatus;
+use App\Exceptions\Fintech\RegulatoryCooldownActiveException;
+use App\Exceptions\Fintech\OutsideLegalOutreachHoursException;
+use App\Models\AuditTrail;
+use App\Models\Borrower;
+use App\Models\BorrowerOptOut;
+use App\Models\CollectionAction;
+use App\Models\CollectionCase;
+use App\Models\Loan;
+use App\Models\OutboxEvent;
+use App\Models\PromiseToPay;
+use App\Models\RegulatoryCooldownLock;
+use Carbon\CarbonImmutable;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+
+final class FairCollectionsService
+{
+    public const LEGAL_HOUR_START = 8;  // 08:00 AM EAT
+    public const LEGAL_HOUR_END   = 18; // 06:00 PM EAT
+    public const COOLDOWN_HOURS   = 48; // 48-Hour quiet period
+
+    /**
+     * Asserts whether the current time falls inside the statutory contact window (08:00–18:00 EAT).
+     */
+    public function isWithinLegalContactHours(?CarbonImmutable $time = null): bool
+    {
+        $eatTime = ($time ?? CarbonImmutable::now())->setTimezone('Africa/Nairobi');
+        $hour = (int) $eatTime->format('H');
+
+        return $hour >= self::LEGAL_HOUR_START && $hour < self::LEGAL_HOUR_END;
+    }
+    
+/**
+ * Asserts legal hours, throwing an explicit regulatory exception if outside 08:00–18:00 EAT.
+ *
+ * @throws OutsideLegalOutreachHoursException
+ */
+public function assertWithinLegalContactHours(?CarbonImmutable $time = null): bool
+{
+    $eatTime = ($time ?? CarbonImmutable::now())->setTimezone('Africa/Nairobi');
+
+    if (!$this->isWithinLegalContactHours($eatTime)) {
+        throw new OutsideLegalOutreachHoursException(
+            currentTimeEAT: $eatTime->format('H:i')
+        );
+    }
+
+    return true;
+}
+
+    /**
+     * Checks if a borrower is currently locked under the 48-hour quiet period.
+     */
+    public function hasActiveCooldown(Borrower $borrower, ?CarbonImmutable $time = null): bool
+    {
+        $now = $time ?? CarbonImmutable::now();
+
+        return RegulatoryCooldownLock::query()
+            ->where('borrower_id', $borrower->id)
+            ->where('lock_type', 'COLLECTIONS_SMS')
+            ->where('locked_until', '>', $now)
+            ->exists();
+    }
+
+    /**
+     * Checks if the collection case has an active, unexpired Promise to Pay (PTP).
+     */
+    public function hasActivePromiseToPay(CollectionCase $case, ?CarbonImmutable $time = null): bool
+    {
+        $now = ($time ?? CarbonImmutable::now())->toDateString();
+
+        return PromiseToPay::query()
+            ->where('collection_case_id', $case->id)
+            ->where('status', 'pending')
+            ->where('promised_date', '>=', $now)
+            ->exists();
+    }
+
+    /**
+     * Evaluates a delinquent loan and dispatches a compliant reminder if legal.
+     */
+    public function processCollectionEscalation(Loan $loan, ?CarbonImmutable $currentTime = null): ?CollectionAction
+    {
+        $now = $currentTime ?? CarbonImmutable::now();
+
+        // 1. Guard against illegal communication hours (08:00 - 18:00 EAT only)
+        if (!$this->isWithinLegalContactHours($now)) {
+            Log::channel('daily')->info(sprintf(
+                'Fair Collections: Skipped Loan #%d outside legal hours (%s EAT)',
+                $loan->id,
+                $now->setTimezone('Africa/Nairobi')->format('H:i')
+            ));
+            return null;
+        }
+
+        return DB::transaction(function () use ($loan, $now): ?CollectionAction {
+            $lockedLoan = Loan::query()->where('id', $loan->id)->lockForUpdate()->firstOrFail();
+            $borrower = $lockedLoan->borrower;
+
+            // 2. Check if borrower opted out of non-mandatory communications
+            $optedOut = BorrowerOptOut::query()
+                ->where('borrower_id', $borrower->id)
+                ->where('channel', 'SMS')
+                ->exists();
+
+            if ($optedOut) {
+                return null;
+            }
+
+            // 3. Resolve or create Collection Case
+            $case = CollectionCase::query()
+                ->where('loan_id', $lockedLoan->id)
+                ->first();
+
+            if ($case === null) {
+                $daysOverdue = max(1, (int) CarbonImmutable::parse($lockedLoan->due_date)->diffInDays($now));
+                $bucket = $this->resolveDpdBucket($daysOverdue);
+
+                $case = CollectionCase::create([
+                    'loan_id'                => $lockedLoan->id,
+                    'borrower_id'            => $borrower->id,
+                    'dpd_bucket'             => $bucket,
+                    'assigned_agent_user_id' => null,
+                    'case_status'            => 'open',
+                    'last_contacted_at'      => null,
+                ]);
+            }
+
+            // 4. Guard against active Promise-to-Pay (PTP) commitments
+            if ($this->hasActivePromiseToPay($case, $now)) {
+                Log::channel('daily')->info(sprintf('Fair Collections: Loan #%d paused on active Promise-to-Pay', $loan->id));
+                return null;
+            }
+
+            // 5. Guard against 48-Hour Cooldown lock
+            $activeLock = RegulatoryCooldownLock::query()
+                ->where('borrower_id', $borrower->id)
+                ->where('lock_type', 'COLLECTIONS_SMS')
+                ->where('locked_until', '>', $now)
+                ->first();
+
+            if ($activeLock !== null) {
+                $hoursRemaining = (int) $now->diffInHours($activeLock->locked_until);
+                throw new RegulatoryCooldownActiveException(
+                    borrowerId: $borrower->id,
+                    lockedUntil: $activeLock->locked_until->toIso8601String(),
+                    hoursRemaining: max(1, $hoursRemaining)
+                );
+            }
+
+            // 6. Generate ethical, non-shaming SMS message payload
+            $daysOverdue = max(1, (int) CarbonImmutable::parse($lockedLoan->due_date)->diffInDays($now));
+            $bucket = $this->resolveDpdBucket($daysOverdue);
+            $message = $this->craftEthicalMessage($lockedLoan, $daysOverdue);
+
+            // 7. Record Collection Action
+            $action = CollectionAction::create([
+                'collection_case_id'   => $case->id,
+                'performed_by_user_id' => null, // Automated system
+                'action_type'          => 'SMS',
+                'message_payload'      => $message,
+                'is_compliant_hours'   => true,
+                'gateway_status'       => 'queued',
+            ]);
+
+            // 8. Apply atomic 48-Hour Cooldown Lock
+            $lockExpiry = $now->addHours(self::COOLDOWN_HOURS);
+            RegulatoryCooldownLock::create([
+                'borrower_id'  => $borrower->id,
+                'lock_type'    => 'COLLECTIONS_SMS',
+                'locked_until' => $lockExpiry,
+                'reason'       => sprintf('48-hour quiet period following %s reminder on Loan #%s', $bucket, $lockedLoan->loan_number),
+            ]);
+
+            $case->update([
+                'last_contacted_at' => $now,
+                'dpd_bucket'        => $bucket,
+            ]);
+
+            // 9. Dispatch Outbox Event for Africa's Talking SMS delivery
+            $prevEvent = OutboxEvent::query()->latest('id')->first();
+            $prevHash = $prevEvent ? $prevEvent->current_event_hash : str_repeat('0', 64);
+
+            $payload = [
+                'action_id'     => $action->id,
+                'borrower_id'   => $borrower->id,
+                'phone_number'  => $borrower->phone_number,
+                'message'       => $message,
+                'dispatched_at' => $now->toIso8601String(),
+            ];
+
+            $currentHash = hash('sha256', $prevHash . 'collection.sms_queued' . json_encode($payload));
+
+            OutboxEvent::create([
+                'aggregate_type'      => CollectionAction::class,
+                'aggregate_id'        => $action->id,
+                'event_name'          => 'collection.sms_queued',
+                'payload'             => $payload,
+                'previous_event_hash' => $prevHash,
+                'current_event_hash'  => $currentHash,
+                'is_published'        => false,
+                'retry_count'         => 0,
+            ]);
+
+            AuditTrail::create([
+                'user_id'        => auth()->id(),
+                'action'         => 'COLLECTION_ESCALATION_DISPATCHED',
+                'auditable_type' => CollectionAction::class,
+                'auditable_id'   => $action->id,
+                'old_values'     => null,
+                'new_values'     => [
+                    'bucket'       => $bucket,
+                    'locked_until' => $lockExpiry->toIso8601String(),
+                ],
+                'ip_address'     => request()->ip() ?? '127.0.0.1',
+                'user_agent'     => request()->userAgent() ?? 'System/CLI',
+            ]);
+
+            return $action;
+        });
+    }
+
+    /**
+     * Batch auditor running daily at 08:30 AM EAT.
+     */
+    public function scanAndEscalateDelinquentPortfolio(?CarbonImmutable $currentTime = null): array
+    {
+        $now = $currentTime ?? CarbonImmutable::now();
+        $dispatched = 0;
+        $skippedHours = 0;
+        $skippedCooldown = 0;
+
+        if (!$this->isWithinLegalContactHours($now)) {
+            return [
+                'status'           => 'HALTED_OUTSIDE_LEGAL_HOURS',
+                'dispatched'       => 0,
+                'skipped_cooldown' => 0,
+            ];
+        }
+
+        // Find overdue active loans
+        $overdueLoans = Loan::query()
+            ->with(['borrower'])
+            ->whereIn('status', [LoanStatus::DISBURSED->value, LoanStatus::DEFAULTED->value, 'watch'])
+            ->where('due_date', '<', $now)
+            ->get();
+
+        foreach ($overdueLoans as $loan) {
+            try {
+                $action = $this->processCollectionEscalation($loan, $now);
+                if ($action !== null) {
+                    $dispatched++;
+                }
+            } catch (RegulatoryCooldownActiveException) {
+                $skippedCooldown++;
+            }
+        }
+
+        return [
+            'status'           => 'COMPLETED',
+            'dispatched'       => $dispatched,
+            'skipped_cooldown' => $skippedCooldown,
+        ];
+    }
+
+    private function resolveDpdBucket(int $daysOverdue): string
+    {
+        return match (true) {
+            $daysOverdue <= 30 => 'DPD_1_30',
+            $daysOverdue <= 60 => 'DPD_31_60',
+            $daysOverdue <= 90 => 'DPD_61_90',
+            default            => 'DPD_90_PLUS',
+        };
+    }
+
+    private function craftEthicalMessage(Loan $loan, int $daysOverdue): string
+    {
+        $firstName = explode(' ', (string) $loan->borrower->full_name)[0] ?? 'Customer';
+
+        return sprintf(
+            'Dear %s, your loan #%s is %d day(s) past due. If you are experiencing hardship, flexible restructuring options are available. Repay via Paybill 174379, Acc: %s. Call 0700000000 for assistance.',
+            $firstName,
+            $loan->loan_number,
+            $daysOverdue,
+            $loan->loan_number
+        );
+    }
+}===== database\migrations\2026_10_05_174736_create_maker_checker_requests_table.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('maker_checker_requests', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('maker_user_id')->constrained('users')->onDelete('restrict');
+            $table->string('action_type', 100);
+            $table->string('target_entity_type', 100);
+            $table->unsignedBigInteger('target_entity_id');
+            $table->json('payload');
+            $table->string('status', 30)->default('pending');
+            $table->foreignId('checker_user_id')->nullable()->constrained('users')->onDelete('set null');
+            $table->text('checker_notes')->nullable();
+            $table->timestamp('actioned_at')->nullable();
+            $table->timestamps();
+
+            $table->index('action_type');
+            $table->index('status');
+            $table->index(['target_entity_type', 'target_entity_id']);
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('maker_checker_requests');
+    }
+};===== database\migrations\2026_10_05_174730_create_collection_cases_table.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('collection_cases', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('loan_id')->unique()->constrained('loans')->onDelete('cascade');
+            $table->foreignId('borrower_id')->constrained('borrowers')->onDelete('cascade');
+            $table->string('dpd_bucket', 20);
+            $table->foreignId('assigned_agent_user_id')->nullable()->constrained('users')->onDelete('set null');
+            $table->string('case_status', 30)->default('open');
+            $table->timestamp('last_contacted_at')->nullable();
+            $table->timestamps();
+
+            $table->index('dpd_bucket');
+            $table->index('case_status');
+            $table->index('last_contacted_at');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('collection_cases');
+    }
+};===== database\migrations\2026_10_05_174732_create_regulatory_cooldown_locks_table.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('regulatory_cooldown_locks', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('borrower_id')->constrained('borrowers')->onDelete('cascade');
+            $table->string('lock_type', 50)->default('COLLECTIONS_SMS');
+            $table->timestamp('locked_until');
+            $table->string('reason', 255);
+            $table->timestamps();
+
+            $table->index('borrower_id');
+            $table->index('locked_until');
+            $table->index(['borrower_id', 'lock_type', 'locked_until'], 'idx_borrower_cooldown_lock');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('regulatory_cooldown_locks');
+    }
+};===== database\migrations\2026_10_05_174732_create_promise_to_pays_table.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('promise_to_pays', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('collection_case_id')->constrained('collection_cases')->onDelete('cascade');
+            $table->date('promised_date');
+            $table->decimal('promised_amount', 12, 2);
+            $table->string('status', 30)->default('pending');
+            $table->timestamp('honored_at')->nullable();
+            $table->timestamps();
+
+            $table->index('promised_date');
+            $table->index('status');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('promise_to_pays');
+    }
+};===== app\Models\MakerCheckerRequest.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+final class MakerCheckerRequest extends Model
+{
+    protected $fillable = [
+        'maker_user_id',
+        'action_type',
+        'target_entity_type',
+        'target_entity_id',
+        'payload',
+        'status',
+        'checker_user_id',
+        'checker_notes',
+        'actioned_at',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'payload'     => 'array',
+            'actioned_at' => 'datetime',
+        ];
+    }
+
+    public function maker(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'maker_user_id');
+    }
+
+    public function checker(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'checker_user_id');
+    }
+}===== app\Models\CollectionCase.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+
+final class CollectionCase extends Model
+{
+    protected $fillable = [
+        'loan_id',
+        'borrower_id',
+        'dpd_bucket',
+        'assigned_agent_user_id',
+        'case_status',
+        'last_contacted_at',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'last_contacted_at' => 'datetime',
+        ];
+    }
+
+    public function loan(): BelongsTo
+    {
+        return $this->belongsTo(Loan::class, 'loan_id');
+    }
+
+    public function borrower(): BelongsTo
+    {
+        return $this->belongsTo(Borrower::class, 'borrower_id');
+    }
+
+    public function agent(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'assigned_agent_user_id');
+    }
+
+    public function actions(): HasMany
+    {
+        return $this->hasMany(CollectionAction::class, 'collection_case_id');
+    }
+
+    public function promisesToPay(): HasMany
+    {
+        return $this->hasMany(PromiseToPay::class, 'collection_case_id');
+    }
+}===== app\Models\PromiseToPay.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+final class PromiseToPay extends Model
+{
+    protected $table = 'promise_to_pays';
+
+    protected $fillable = [
+        'collection_case_id',
+        'promised_date',
+        'promised_amount',
+        'status',
+        'honored_at',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'promised_amount' => 'decimal:2',
+            'promised_date'   => 'date',
+            'honored_at'      => 'datetime',
+        ];
+    }
+
+    public function case(): BelongsTo
+    {
+        return $this->belongsTo(CollectionCase::class, 'collection_case_id');
+    }
+}===== app\Models\RegulatoryCooldownLock.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+final class RegulatoryCooldownLock extends Model
+{
+    protected $fillable = [
+        'borrower_id',
+        'lock_type',
+        'locked_until',
+        'reason',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'locked_until' => 'datetime',
+        ];
+    }
+
+    public function borrower(): BelongsTo
+    {
+        return $this->belongsTo(Borrower::class, 'borrower_id');
+    }
+}===== app\Models\InDuplumTracking.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+final class InDuplumTracking extends Model
+{
+    protected $table = 'in_duplum_tracking';
+
+    protected $fillable = [
+        'loan_id',
+        'defaulted_at',
+        'default_principal_snapshot',
+        'total_post_default_interest',
+        'total_post_default_penalties',
+        'statutory_cap_limit',
+        'is_frozen',
+        'frozen_at',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'default_principal_snapshot'  => 'decimal:2',
+            'total_post_default_interest' => 'decimal:2',
+            'total_post_default_penalties'=> 'decimal:2',
+            'statutory_cap_limit'         => 'decimal:2',
+            'is_frozen'                   => 'boolean',
+            'defaulted_at'                => 'datetime',
+            'frozen_at'                   => 'datetime',
+        ];
+    }
+
+    public function loan(): BelongsTo
+    {
+        return $this->belongsTo(Loan::class, 'loan_id');
+    }
+}===== app\Http\Controllers\DashboardController.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Controllers;
+
+use App\Enums\LoanStatus;
+use App\Models\EclProvision;
+use App\Models\InDuplumTracking;
+use App\Models\Loan;
+use App\Models\LoanLedgerEntry;
+use App\Models\MakerCheckerRequest;
+use Carbon\CarbonImmutable;
+use Illuminate\Contracts\View\View;
+use Illuminate\Http\Request;
+
+final class DashboardController extends Controller
+{
+    /**
+     * Institutional Command Center for Lender Staff (Admins, Underwriters, Finance, Collections).
+     */
+    public function lender(): View
+    {
+        $now = CarbonImmutable::now();
+
+        // 1. Total Active Capital Disbursed (KES)
+        $activeLoans = Loan::query()->whereIn('status', [
+            LoanStatus::DISBURSED,
+            LoanStatus::RESTRUCTURED,
+            LoanStatus::DEFAULTED,
+        ]);
+
+        $totalDisbursed = (string) $activeLoans->sum('principal_disbursed');
+
+        // 2. Portfolio at Risk (PAR 30): Active principal overdue > 30 days
+        $par30Principal = (string) Loan::query()
+            ->whereIn('status', [LoanStatus::DISBURSED, LoanStatus::DEFAULTED, LoanStatus::RESTRUCTURED])
+            ->where('due_date', '<', $now->subDays(30))
+            ->sum('principal_disbursed');
+
+        $par30Percentage = bccomp($totalDisbursed, '0.00', 2) > 0
+            ? bcmul(bcdiv($par30Principal, $totalDisbursed, 4), '100.00', 2)
+            : '0.00';
+
+        // 3. Total IFRS 9 Expected Credit Loss (ECL) Reserves
+        $totalEclReserve = (string) EclProvision::query()
+            ->where('reporting_date', EclProvision::max('reporting_date'))
+            ->sum('calculated_ecl');
+
+        // 4. Section 44A In-Duplum Freezes Count
+        $inDuplumFrozenCount = Loan::query()->where('is_in_duplum_locked', true)->count();
+
+        // 5. Dual-Control Maker-Checker Requests (Pending Queue)
+        $pendingMakerCheckerCount = MakerCheckerRequest::query()->where('status', 'pending')->count();
+        $pendingMakerCheckerQueue = MakerCheckerRequest::query()
+            ->with('maker')
+            ->where('status', 'pending')
+            ->latest('id')
+            ->limit(5)
+            ->get();
+
+        // 6. Regulatory In-Duplum & Default Watchlist
+        $inDuplumWatchlist = InDuplumTracking::query()
+            ->with(['loan.borrower'])
+            ->latest('id')
+            ->limit(5)
+            ->get();
+
+        // 7. Live Append-Only Financial Ledger Feed
+        $recentLedgerEntries = LoanLedgerEntry::query()
+            ->with('loan.borrower')
+            ->latest('id')
+            ->limit(6)
+            ->get();
+
+        return view('lender.dashboard', [
+            'totalDisbursed'           => $totalDisbursed,
+            'par30Principal'           => $par30Principal,
+            'par30Percentage'          => $par30Percentage,
+            'totalEclReserve'          => $totalEclReserve,
+            'inDuplumFrozenCount'      => $inDuplumFrozenCount,
+            'pendingMakerCheckerCount' => $pendingMakerCheckerCount,
+            'pendingMakerCheckerQueue' => $pendingMakerCheckerQueue,
+            'inDuplumWatchlist'        => $inDuplumWatchlist,
+            'recentLedgerEntries'      => $recentLedgerEntries,
+        ]);
+    }
+
+    /**
+     * Borrower Safe Space Mobile Portal.
+     */
+    public function borrower(Request $request): View
+    {
+        $user = $request->user();
+        $borrower = $user ? $user->borrower : null;
+        $activeLoan = null;
+
+        if ($borrower) {
+            $activeLoan = Loan::query()
+                ->where('borrower_id', $borrower->id)
+                ->whereIn('status', [LoanStatus::DISBURSED, LoanStatus::DEFAULTED, LoanStatus::RESTRUCTURED, LoanStatus::APPROVAL_HOLD])
+                ->with(['inDuplumTracking', 'ledgerEntries'])
+                ->latest('id')
+                ->first();
+        }
+
+        return view('borrower.dashboard', [
+            'borrower'   => $borrower,
+            'activeLoan' => $activeLoan,
+        ]);
+    }
+}===== app\Enums\UserRole.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Enums;
+
+enum UserRole: string
+{
+    case LenderAdmin = 'lender_admin';
+    case CreditOfficer = 'credit_officer';
+    case CollectionsOfficer = 'collections_officer';
+    case FinanceOfficer = 'finance_officer';
+    case Borrower = 'borrower';
+
+    /** @return list<string> */
+    public static function staff(): array
+    {
+        return [
+            self::LenderAdmin->value,
+            self::CreditOfficer->value,
+            self::CollectionsOfficer->value,
+            self::FinanceOfficer->value,
+        ];
+    }
+
+    /** Pipe-separated list, the format Spatie's role middleware expects. */
+    public static function staffPipe(): string
+    {
+        return implode('|', self::staff());
+    }
+}===== routes\web.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use App\Enums\UserRole;
+use App\Http\Controllers\Auth\LoginController;
+use App\Http\Controllers\ContractVerificationController;
+use App\Http\Controllers\DashboardController;
+use Illuminate\Support\Facades\Route;
+use Spatie\Permission\Middleware\RoleMiddleware;
+use App\Http\Controllers\Borrower\PortalController;
+use App\Http\Controllers\Borrower\RestructuringController;
+use App\Http\Controllers\Borrower\PaymentController;
+
+Route::get('/verify/contract/{code}', [ContractVerificationController::class, 'verify'])->name('contract.verify');
+
+Route::get('/', function () {
+    return view('welcome');
+});
+
+Route::middleware('guest')->group(function () {
+    Route::get('/login', [LoginController::class, 'create'])->name('login');
+    Route::post('/login', [LoginController::class, 'store'])->middleware('throttle:5,1')->name('login.store');
+});
+
+Route::post('/logout', [LoginController::class, 'destroy'])->middleware('auth')->name('logout');
+
+Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::staffPipe()])
+    ->prefix('lender')
+    ->name('lender.')
+    ->group(function () {
+        Route::get('/dashboard', [DashboardController::class, 'lender'])->name('dashboard');
+    });
+
+Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::Borrower->value])
+    ->prefix('borrower')
+    ->name('borrower.')
+    ->group(function () {
+        Route::get('/dashboard', [PortalController::class, 'show'])->name('dashboard');
+        Route::post('/loans/{loan}/restructuring', [RestructuringController::class, 'accept'])->name('restructuring.accept');
+                Route::post('/loans/{loan}/pay', [PaymentController::class, 'store'])->middleware('throttle:6,1')->name('payment.store');
+    });===== resources\views\components\layouts\lender.blade.php ===== 
+@props(['title' => 'Dashboard'])
+@php
+    $user = auth()->user();
+    $roleLabel = \Illuminate\Support\Str::headline((string) $user->getRoleNames()->first());
+    $nav = [
+        ['label' => 'Dashboard', 'route' => 'lender.dashboard'],
+    ];
+@endphp
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ $title }} | {{ config('app.name') }}</title>
+    @vite(['resources/css/app.css', 'resources/js/app.js'])
+</head>
+<body class="bg-paper font-sans text-ink antialiased" x-data="{ open: false }">
+    <div x-show="open" x-cloak x-on:click="open = false" class="fixed inset-0 z-20 bg-ink/50 lg:hidden"></div>
+
+    <aside class="fixed inset-y-0 left-0 z-30 flex w-64 flex-col bg-brand-900 text-brand-100 transition-transform duration-200 motion-reduce:transition-none lg:translate-x-0"
+           x-bind:class="open ? 'translate-x-0' : '-translate-x-full'">
+        <div class="px-6 py-5 text-lg font-semibold text-white">{{ config('app.name') }}</div>
+
+        <nav class="flex-1 space-y-1 px-3" aria-label="Main">
+            @foreach ($nav as $item)
+                <a href="{{ route($item['route']) }}"
+                   @if (request()->routeIs($item['route'])) aria-current="page" @endif
+                   @class([
+                       'flex items-center rounded-md px-3 py-2 text-sm font-medium',
+                       'bg-white/10 text-white' => request()->routeIs($item['route']),
+                       'hover:bg-white/5' => ! request()->routeIs($item['route']),
+                   ])>{{ $item['label'] }}</a>
+            @endforeach
+        </nav>
+
+        <div class="border-t border-white/10 px-6 py-4">
+            <p class="truncate text-sm font-medium text-white">{{ $user->name }}</p>
+            <p class="text-xs">{{ $roleLabel }}</p>
+            <form method="POST" action="{{ route('logout') }}" class="mt-3">
+                @csrf
+                <button type="submit" class="text-sm underline-offset-4 hover:text-white hover:underline">Sign out</button>
+            </form>
+        </div>
+    </aside>
+
+    <div class="lg:pl-64">
+        <header class="sticky top-0 z-10 flex h-14 items-center gap-3 border-b border-line bg-paper/90 px-4 backdrop-blur sm:px-8">
+            <button type="button" class="-ml-1 rounded-md p-2 lg:hidden" x-on:click="open = true" aria-label="Open menu">
+                <svg class="h-5 w-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14"/></svg>
+            </button>
+            <h1 class="text-base font-semibold">{{ $title }}</h1>
+        </header>
+
+        <main class="px-4 py-6 sm:px-8">
+            {{ $slot }}
+        </main>
+    </div>
+</body>
+</html>

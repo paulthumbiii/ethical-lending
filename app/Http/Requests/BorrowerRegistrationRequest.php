@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rules\Password;
 
 final class BorrowerRegistrationRequest extends FormRequest
 {
@@ -28,7 +29,8 @@ final class BorrowerRegistrationRequest extends FormRequest
             'id_number' => ['required', 'string', 'regex:/^[0-9]{6,9}$/', 'unique:borrowers,id_number'],
             'phone_number' => ['required', 'string', 'regex:/^(?:254|\+254|0)?([71][0-9]{8})$/'],
             'kra_pin' => ['nullable', 'string', 'regex:/^[A-Z][0-9]{9}[A-Z]$/'],
-            'email' => ['nullable', 'string', 'email', 'max:255', 'unique:borrowers,email'],
+            'email' => ['nullable', 'string', 'email', 'max:255', 'unique:borrowers,email', 'unique:users,email'],
+            'password' => ['required', 'string', 'confirmed', Password::min(8)->letters()->numbers()],
             'monthly_income' => ['required', 'numeric', 'min:0'],
             'monthly_expenses' => ['required', 'numeric', 'min:0'],
             'mpesa_average_monthly_inflow' => ['nullable', 'numeric', 'min:0'],
@@ -48,6 +50,7 @@ final class BorrowerRegistrationRequest extends FormRequest
             'id_number.regex' => 'The ID number must be a valid Kenyan National ID (6 to 9 digits).',
             'phone_number.regex' => 'The phone number must be a valid Kenyan mobile number (Safaricom/Airtel format).',
             'kra_pin.regex' => 'The KRA PIN must match standard format (e.g., A123456789X).',
+            'password.confirmed' => 'The two passwords do not match.',
             'data_protection_consent.accepted' => 'Explicit statutory consent under the Kenya Data Protection Act 2019 is required to register.',
         ];
     }

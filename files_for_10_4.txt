@@ -1,0 +1,74 @@
+===== app\Models\AuditTrail.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+final class AuditTrail extends Model
+{
+    public $timestamps = false;
+
+    protected $fillable = [
+        'user_id',
+        'action',
+        'auditable_type',
+        'auditable_id',
+        'old_values',
+        'new_values',
+        'ip_address',
+        'user_agent',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'old_values' => 'array',
+            'new_values' => 'array',
+            'created_at' => 'datetime',
+        ];
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'user_id');
+    }
+}===== database\migrations\2026_10_05_174750_create_audit_trails_table.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('audit_trails', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('user_id')->nullable()->constrained('users')->onDelete('set null');
+            $table->string('action', 100);
+            $table->string('auditable_type', 100);
+            $table->unsignedBigInteger('auditable_id');
+            $table->json('old_values')->nullable();
+            $table->json('new_values')->nullable();
+            $table->string('ip_address', 45);
+            $table->string('user_agent', 255);
+            $table->timestamp('created_at')->useCurrent();
+
+            $table->index('action');
+            $table->index(['auditable_type', 'auditable_id']);
+            $table->index('created_at');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('audit_trails');
+    }
+};

@@ -7,6 +7,7 @@ namespace App\Models;
 use App\Enums\RiskBand;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
@@ -15,6 +16,7 @@ final class Borrower extends Model
     use HasFactory;
 
     protected $fillable = [
+        'user_id',
         'full_name',
         'id_number',
         'kra_pin',
@@ -32,6 +34,11 @@ final class Borrower extends Model
             'risk_band'      => RiskBand::class,
             'is_blacklisted' => 'boolean',
         ];
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'user_id');
     }
 
     public function financialProfile(): HasOne

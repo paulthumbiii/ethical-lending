@@ -1,0 +1,393 @@
+===== app\Services\Customer\BorrowerOnboardingService.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Customer;
+
+use App\Enums\RiskBand;
+use App\Exceptions\Fintech\DataProtectionConsentMissingException;
+use App\Models\AuditTrail;
+use App\Models\Borrower;
+use App\Models\BorrowerFinancialProfile;
+use App\Models\DataProtectionConsent;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+
+final class BorrowerOnboardingService
+{
+    /**
+     * Executes borrower registration, financial profiling, KDPA 2019 consent logging, and audit tracking inside an atomic transaction.
+     *
+     * @param array $data Validated input data from BorrowerRegistrationRequest
+     * @param string|null $ipAddress Client IP address
+     * @param string|null $userAgent Client User Agent string
+     * @return Borrower
+     * @throws DataProtectionConsentMissingException
+     */
+    public function register(array $data, ?string $ipAddress = null, ?string $userAgent = null): Borrower
+    {
+        $consentGranted = filter_var($data['data_protection_consent'] ?? false, FILTER_VALIDATE_BOOLEAN);
+
+        if (! $consentGranted) {
+            throw new DataProtectionConsentMissingException($data['id_number'] ?? 'UNKNOWN');
+        }
+
+        return DB::transaction(function () use ($data, $ipAddress, $userAgent) {
+            $normalizedPhone = $this->normalizePhoneNumber((string) $data['phone_number']);
+
+            /** @var Borrower $borrower */
+            $borrower = Borrower::create([
+                'full_name' => $data['full_name'],
+                'id_number' => $data['id_number'],
+                'kra_pin' => isset($data['kra_pin']) ? strtoupper((string) $data['kra_pin']) : null,
+                'phone_number' => $normalizedPhone,
+                'email' => $data['email'] ?? null,
+                'credit_limit' => '0.00',
+                'risk_band' => RiskBand::C,
+                'is_blacklisted' => false,
+            ]);
+
+            BorrowerFinancialProfile::create([
+                'borrower_id' => $borrower->id,
+                'monthly_income' => $data['monthly_income'],
+                'monthly_expenses' => $data['monthly_expenses'],
+                'mpesa_average_monthly_inflow' => $data['mpesa_average_monthly_inflow'] ?? '0.00',
+                'existing_debt_obligations' => $data['existing_debt_obligations'] ?? '0.00',
+            ]);
+
+            DataProtectionConsent::create([
+                'borrower_id' => $borrower->id,
+                'consent_type' => 'CREDIT_SCORING_AND_M_PESA_DATA_PROCESSING',
+                'is_granted' => true,
+                'ip_address' => $ipAddress ?? '127.0.0.1',
+                'user_agent' => $userAgent ?? 'SYSTEM',
+                'granted_at' => now(),
+            ]);
+
+            AuditTrail::create([
+                'user_id' => auth()->id(),
+                'action' => 'BORROWER_ONBOARDED',
+                'auditable_type' => Borrower::class,
+                'auditable_id' => $borrower->id,
+                'old_values' => null,
+                'new_values' => [
+                    'id_number' => $borrower->id_number,
+                    'phone_number' => $borrower->phone_number,
+                    'risk_band' => $borrower->risk_band->value,
+                ],
+                'ip_address' => $ipAddress ?? '127.0.0.1',
+                'user_agent' => $userAgent ?? 'SYSTEM',
+            ]);
+
+            Log::channel('fintech')->info("Borrower onboarding successful: ID {$borrower->id} [{$borrower->id_number}]");
+
+            return $borrower;
+        });
+    }
+
+    /**
+     * Normalizes Kenyan phone numbers to E.164 Safaricom format (2547XXXXXXXX or 2541XXXXXXXX).
+     */
+    private function normalizePhoneNumber(string $phone): string
+    {
+        $cleaned = preg_replace('/\D/', '', $phone);
+
+        if (str_starts_with($cleaned, '0')) {
+            return '254'.substr($cleaned, 1);
+        }
+
+        if (str_starts_with($cleaned, '7') || str_starts_with($cleaned, '1')) {
+            return '254'.$cleaned;
+        }
+
+        return $cleaned;
+    }
+}===== app\Http\Requests\BorrowerRegistrationRequest.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Requests;
+
+use Illuminate\Foundation\Http\FormRequest;
+
+final class BorrowerRegistrationRequest extends FormRequest
+{
+    /**
+     * Determine if the user is authorized to make this request.
+     */
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    /**
+     * Get the validation rules that apply to the request.
+     *
+     * @return array<string, \Illuminate\Contracts\Validation\ValidationRule|array<mixed>|string>
+     */
+    public function rules(): array
+    {
+        return [
+            'full_name' => ['required', 'string', 'min:3', 'max:255'],
+            'id_number' => ['required', 'string', 'regex:/^[0-9]{6,9}$/', 'unique:borrowers,id_number'],
+            'phone_number' => ['required', 'string', 'regex:/^(?:254|\+254|0)?([71][0-9]{8})$/'],
+            'kra_pin' => ['nullable', 'string', 'regex:/^[A-Z][0-9]{9}[A-Z]$/'],
+            'email' => ['nullable', 'string', 'email', 'max:255', 'unique:borrowers,email'],
+            'monthly_income' => ['required', 'numeric', 'min:0'],
+            'monthly_expenses' => ['required', 'numeric', 'min:0'],
+            'mpesa_average_monthly_inflow' => ['nullable', 'numeric', 'min:0'],
+            'existing_debt_obligations' => ['nullable', 'numeric', 'min:0'],
+            'data_protection_consent' => ['required', 'boolean', 'accepted'],
+        ];
+    }
+
+    /**
+     * Get custom messages for validator errors.
+     *
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return [
+            'id_number.regex' => 'The ID number must be a valid Kenyan National ID (6 to 9 digits).',
+            'phone_number.regex' => 'The phone number must be a valid Kenyan mobile number (Safaricom/Airtel format).',
+            'kra_pin.regex' => 'The KRA PIN must match standard format (e.g., A123456789X).',
+            'data_protection_consent.accepted' => 'Explicit statutory consent under the Kenya Data Protection Act 2019 is required to register.',
+        ];
+    }
+}===== tests\Feature\BorrowerOnboardingTest.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace Tests\Feature;
+
+use App\Enums\RiskBand;
+use App\Exceptions\Fintech\DataProtectionConsentMissingException;
+use App\Models\AuditTrail;
+use App\Models\Borrower;
+use App\Models\BorrowerFinancialProfile;
+use App\Models\DataProtectionConsent;
+use App\Services\Customer\BorrowerOnboardingService;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+uses(TestCase::class, RefreshDatabase::class);
+
+test('registers borrower successfully with normalized E.164 phone number', function () {
+    /** @var BorrowerOnboardingService $service */
+    $service = $this->app->make(BorrowerOnboardingService::class);
+
+    $payload = [
+        'full_name' => 'Wanjiku Kamau',
+        'id_number' => '32891042',
+        'phone_number' => '0712345678',
+        'kra_pin' => 'A019283746X',
+        'email' => 'wanjiku@example.com',
+        'monthly_income' => '85000.00',
+        'monthly_expenses' => '35000.00',
+        'mpesa_average_monthly_inflow' => '90000.00',
+        'existing_debt_obligations' => '5000.00',
+        'data_protection_consent' => true,
+    ];
+
+    $borrower = $service->register($payload, '192.168.1.10', 'PestTestAgent/1.0');
+
+    expect($borrower)->toBeInstanceOf(Borrower::class)
+        ->and($borrower->phone_number)->toBe('254712345678')
+        ->and($borrower->id_number)->toBe('32891042')
+        ->and($borrower->risk_band)->toBe(RiskBand::C);
+
+    $this->assertDatabaseHas('borrowers', [
+        'id' => $borrower->id,
+        'phone_number' => '254712345678',
+        'id_number' => '32891042',
+    ]);
+
+    $this->assertDatabaseHas('borrower_financial_profiles', [
+        'borrower_id' => $borrower->id,
+        'monthly_income' => '85000.00',
+        'monthly_expenses' => '35000.00',
+    ]);
+
+    $this->assertDatabaseHas('data_protection_consents', [
+        'borrower_id' => $borrower->id,
+        'is_granted' => true,
+        'ip_address' => '192.168.1.10',
+    ]);
+
+    $this->assertDatabaseHas('audit_trails', [
+        'action' => 'BORROWER_ONBOARDED',
+        'auditable_type' => Borrower::class,
+        'auditable_id' => $borrower->id,
+    ]);
+});
+
+test('throws DataProtectionConsentMissingException when consent is not granted', function () {
+    /** @var BorrowerOnboardingService $service */
+    $service = $this->app->make(BorrowerOnboardingService::class);
+
+    $payload = [
+        'full_name' => 'John Doe',
+        'id_number' => '12345678',
+        'phone_number' => '0700000000',
+        'monthly_income' => '50000.00',
+        'monthly_expenses' => '20000.00',
+        'data_protection_consent' => false,
+    ];
+
+    $service->register($payload);
+})->throws(DataProtectionConsentMissingException::class);===== app\Models\User.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use App\Enums\UserRole;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Foundation\Auth\User as Authenticatable;
+use Illuminate\Notifications\Notifiable;
+use Spatie\Permission\Traits\HasRoles;
+
+final class User extends Authenticatable
+{
+    use HasFactory, HasRoles, Notifiable;
+
+    /** @var array<int, string> */
+    protected $fillable = [
+        'name',
+        'email',
+        'password',
+        'phone_number',
+        'is_active',
+    ];
+
+    /** @var array<int, string> */
+    protected $hidden = [
+        'password',
+        'remember_token',
+    ];
+
+    /** @return array<string, string> */
+    protected function casts(): array
+    {
+        return [
+            'is_active' => 'boolean',
+            'password' => 'hashed',
+        ];
+    }
+
+    public function isBorrower(): bool
+    {
+        return $this->hasRole(UserRole::Borrower->value);
+    }
+
+    public function isStaff(): bool
+    {
+        return $this->hasAnyRole(UserRole::staff());
+    }
+
+    public function borrower(): HasOne
+    {
+        return $this->hasOne(Borrower::class, 'user_id');
+    }
+
+    public function makerRequests(): HasMany
+    {
+        return $this->hasMany(MakerCheckerRequest::class, 'maker_user_id');
+    }
+
+    public function checkerRequests(): HasMany
+    {
+        return $this->hasMany(MakerCheckerRequest::class, 'checker_user_id');
+    }
+
+    public function auditTrails(): HasMany
+    {
+        return $this->hasMany(AuditTrail::class, 'user_id');
+    }
+}===== database\seeders\RolesSeeder.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace Database\Seeders;
+
+use App\Enums\UserRole;
+use Illuminate\Database\Seeder;
+use Spatie\Permission\Models\Role;
+use Spatie\Permission\PermissionRegistrar;
+
+final class RolesSeeder extends Seeder
+{
+    public function run(): void
+    {
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+
+        foreach (UserRole::cases() as $role) {
+            Role::findOrCreate($role->value, 'web');
+        }
+    }
+}===== database\seeders\DemoUsersSeeder.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace Database\Seeders;
+
+use App\Enums\UserRole;
+use App\Models\Borrower;
+use App\Models\User;
+use Illuminate\Database\Seeder;
+
+/** LOCAL DEMO ONLY. Never run this against a live database. */
+final class DemoUsersSeeder extends Seeder
+{
+    private const PASSWORD = 'Demo@12345';
+
+    public function run(): void
+    {
+        $this->call(RolesSeeder::class);
+
+        $staff = [
+            ['Grace Njeri', 'admin@ethical-lending.test', '254700000001', UserRole::LenderAdmin],
+            ['Peter Otieno', 'credit@ethical-lending.test', '254700000002', UserRole::CreditOfficer],
+            ['Mary Achieng', 'collections@ethical-lending.test', '254700000003', UserRole::CollectionsOfficer],
+            ['John Kamau', 'finance@ethical-lending.test', '254700000004', UserRole::FinanceOfficer],
+        ];
+
+        foreach ($staff as [$name, $email, $phone, $role]) {
+            $user = User::updateOrCreate(['email' => $email], [
+                'name' => $name,
+                'password' => self::PASSWORD,
+                'phone_number' => $phone,
+                'is_active' => true,
+            ]);
+            $user->syncRoles([$role->value]);
+        }
+
+        $borrowerUser = User::updateOrCreate(['email' => 'borrower@ethical-lending.test'], [
+            'name' => 'Amina Wanjiku',
+            'password' => self::PASSWORD,
+            'phone_number' => '254700000010',
+            'is_active' => true,
+        ]);
+        $borrowerUser->syncRoles([UserRole::Borrower->value]);
+
+        Borrower::updateOrCreate(['id_number' => '12345678'], [
+            'user_id' => $borrowerUser->id,
+            'full_name' => 'Amina Wanjiku',
+            'kra_pin' => 'A123456789B',
+            'phone_number' => '254700000010',
+            'email' => 'borrower@ethical-lending.test',
+            'credit_limit' => '15000.00',
+            'risk_band' => 'B',
+            'is_blacklisted' => false,
+        ]);
+    }
+}

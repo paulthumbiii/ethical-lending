@@ -1,0 +1,501 @@
+===== database\migrations\2026_10_05_153408_create_amortization_schedules_table.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('amortization_schedules', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('loan_id')->constrained('loans')->onDelete('cascade');
+            $table->integer('installment_number');
+            $table->date('due_date');
+            $table->decimal('principal_due', 12, 2);
+            $table->decimal('interest_due', 12, 2);
+            $table->decimal('fees_due', 12, 2);
+            $table->decimal('total_installment_due', 12, 2);
+            $table->decimal('principal_paid', 12, 2)->default(0.00);
+            $table->decimal('interest_paid', 12, 2)->default(0.00);
+            $table->decimal('fees_paid', 12, 2)->default(0.00);
+            $table->string('status', 30)->default('pending');
+            $table->timestamps();
+
+            $table->index('due_date');
+            $table->index('status');
+            $table->index(['loan_id', 'installment_number']);
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('amortization_schedules');
+    }
+};===== database\migrations\2026_10_05_153413_create_in_duplum_tracking_table.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('in_duplum_tracking', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('loan_id')->unique()->constrained('loans')->onDelete('cascade');
+            $table->timestamp('defaulted_at');
+            $table->decimal('default_principal_snapshot', 12, 2);
+            $table->decimal('total_post_default_interest', 12, 2)->default(0.00);
+            $table->decimal('total_post_default_penalties', 12, 2)->default(0.00);
+            $table->decimal('statutory_cap_limit', 12, 2);
+            $table->boolean('is_frozen')->default(false);
+            $table->timestamp('frozen_at')->nullable();
+            $table->timestamps();
+
+            $table->index('is_frozen');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('in_duplum_tracking');
+    }
+};===== database\migrations\2026_10_05_153414_create_restructuring_proposals_table.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('restructuring_proposals', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('loan_id')->constrained('loans')->onDelete('cascade');
+            $table->string('proposal_code', 50)->unique();
+            $table->string('status', 30)->default('offered');
+            $table->decimal('forgiven_interest', 12, 2)->default(0.00);
+            $table->decimal('forgiven_penalties', 12, 2)->default(0.00);
+            $table->decimal('capitalized_principal', 12, 2);
+            $table->decimal('new_interest_rate', 5, 2);
+            $table->integer('tenure_extension_days');
+            $table->decimal('repayment_ratio_snapshot', 5, 2);
+            $table->timestamp('expires_at');
+            $table->timestamp('accepted_at')->nullable();
+            $table->timestamps();
+
+            $table->index('status');
+            $table->index('proposal_code');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('restructuring_proposals');
+    }
+};===== database\migrations\2026_10_05_174729_create_mpesa_stk_requests_table.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('mpesa_stk_requests', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('loan_id')->constrained('loans')->onDelete('restrict');
+            $table->string('merchant_request_id', 100);
+            $table->string('checkout_request_id', 100)->unique();
+            $table->string('phone_number', 20);
+            $table->decimal('amount', 12, 2);
+            $table->string('mpesa_receipt_number', 50)->nullable()->unique();
+            $table->integer('result_code')->nullable();
+            $table->string('result_desc', 255)->nullable();
+            $table->string('status', 30)->default('pending');
+            $table->timestamps();
+
+            $table->index('loan_id');
+            $table->index('checkout_request_id');
+            $table->index('mpesa_receipt_number');
+            $table->index('status');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('mpesa_stk_requests');
+    }
+};===== app\Services\Servicing\RestructuringEngine.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Servicing;
+
+use App\Enums\LoanStatus;
+use App\Exceptions\Fintech\RestructuringNotEligibleException;
+use App\Models\AuditTrail;
+use App\Models\Borrower;
+use App\Models\Loan;
+use App\Models\LoanLedgerEntry;
+use App\Models\OutboxEvent;
+use App\Models\RestructuringProposal;
+use App\Models\RestructuringSchedule;
+use Carbon\CarbonImmutable;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+
+final class RestructuringEngine
+{
+    private const MINIMUM_ELIGIBILITY_RATIO = '0.30';
+
+    /**
+     * Calculates the borrower's historical on-time repayment ratio (0.00 to 1.00).
+     */
+    public function calculateRepaymentRatio(Borrower $borrower): string
+    {
+        $loans = Loan::query()
+            ->where('borrower_id', $borrower->id)
+            ->with('ledgerEntries')
+            ->get();
+
+        if ($loans->isEmpty()) {
+            return '1.00'; // New borrower baseline
+        }
+
+        $totalDisbursed = '0.00';
+        $totalRepaid = '0.00';
+
+        foreach ($loans as $loan) {
+            $totalDisbursed = bcadd($totalDisbursed, (string) $loan->principal_disbursed, 2);
+
+            $repaid = $loan->ledgerEntries
+                ->where('entry_type', 'repayment')
+                ->sum('credit');
+
+            $totalRepaid = bcadd($totalRepaid, (string) $repaid, 2);
+        }
+
+        if (bccomp($totalDisbursed, '0.00', 2) === 0) {
+            return '1.00';
+        }
+
+        // Ratio = min(1.00, totalRepaid / totalDisbursed)
+        $ratio = bcdiv($totalRepaid, $totalDisbursed, 2);
+
+        return bccomp($ratio, '1.00', 2) > 0 ? '1.00' : $ratio;
+    }
+
+    /**
+     * Generates a tailored restructuring proposal with penalty fee forgiveness.
+     */
+    public function generateProposal(
+        Loan $loan,
+        int $tenureExtensionDays = 30,
+        ?string $concessionRate = null
+    ): RestructuringProposal {
+        return DB::transaction(function () use ($loan, $tenureExtensionDays, $concessionRate): RestructuringProposal {
+            $lockedLoan = Loan::query()->where('id', $loan->id)->lockForUpdate()->firstOrFail();
+
+            if (in_array($lockedLoan->status->value, ['settled', 'written_off'], true)) {
+                throw new RestructuringNotEligibleException(
+                    loanId: $lockedLoan->id,
+                    repaymentRatio: '0.00',
+                    reason: 'Cannot restructure a settled or written-off facility.'
+                );
+            }
+
+            // 1. Evaluate Behavioral Eligibility
+            $ratio = $this->calculateRepaymentRatio($lockedLoan->borrower);
+
+            if (bccomp($ratio, self::MINIMUM_ELIGIBILITY_RATIO, 2) < 0) {
+                throw new RestructuringNotEligibleException(
+                    loanId: $lockedLoan->id,
+                    repaymentRatio: $ratio,
+                    reason: 'Historical repayment ratio falls below the minimum 30% threshold.'
+                );
+            }
+
+            // 2. Read latest balances from immutable ledger
+            $latest = LoanLedgerEntry::query()
+                ->where('loan_id', $lockedLoan->id)
+                ->latest('id')
+                ->first();
+
+            $principalOwed = $latest !== null ? (string) $latest->running_principal_balance : (string) $lockedLoan->principal_disbursed;
+            $interestOwed = $latest !== null ? (string) $latest->running_interest_balance : '0.00';
+            $feesOwed = $latest !== null ? (string) $latest->running_fees_balance : '0.00';
+
+            // 3. Relief Concessions: Forgive 100% of penalty fees
+            $forgivenPenalties = $feesOwed;
+            $forgivenInterest = '0.00'; // Retain legitimate interest, forgive penalties
+            $capitalizedPrincipal = $principalOwed;
+            $newRate = $concessionRate ?? (string) $lockedLoan->annual_interest_rate;
+            $now = CarbonImmutable::now();
+
+            $proposal = RestructuringProposal::create([
+                'loan_id'                  => $lockedLoan->id,
+                'proposal_code'            => 'RST-' . strtoupper(Str::random(8)),
+                'status'                   => 'offered',
+                'forgiven_interest'        => $forgivenInterest,
+                'forgiven_penalties'       => $forgivenPenalties,
+                'capitalized_principal'    => $capitalizedPrincipal,
+                'new_interest_rate'        => $newRate,
+                'tenure_extension_days'    => $tenureExtensionDays,
+                'repayment_ratio_snapshot' => $ratio,
+                'expires_at'               => $now->addDays(7),
+                'accepted_at'              => null,
+            ]);
+
+            // 4. Generate Re-amortization Installment Schedule (e.g. 2 bi-weekly installments)
+            $totalRemaining = bcadd($capitalizedPrincipal, $interestOwed, 2);
+            $installmentAmount = bcdiv($totalRemaining, '2.00', 2);
+            $remainder = bcsub($totalRemaining, bcmul($installmentAmount, '2.00', 2), 2);
+
+            RestructuringSchedule::create([
+                'restructuring_proposal_id' => $proposal->id,
+                'installment_number'        => 1,
+                'due_date'                  => $now->addDays((int) ($tenureExtensionDays / 2))->toDateString(),
+                'installment_amount'        => $installmentAmount,
+                'status'                    => 'pending',
+            ]);
+
+            RestructuringSchedule::create([
+                'restructuring_proposal_id' => $proposal->id,
+                'installment_number'        => 2,
+                'due_date'                  => $now->addDays($tenureExtensionDays)->toDateString(),
+                'installment_amount'        => bcadd($installmentAmount, $remainder, 2),
+                'status'                    => 'pending',
+            ]);
+
+            return $proposal;
+        });
+    }
+
+    /**
+     * Executes the acceptance of a restructuring proposal by the borrower.
+     */
+    public function acceptProposal(RestructuringProposal $proposal): Loan
+    {
+        return DB::transaction(function () use ($proposal): Loan {
+            $lockedProposal = RestructuringProposal::query()
+                ->where('id', $proposal->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            if ($lockedProposal->status !== 'offered') {
+                throw new \DomainException("Proposal is already {$lockedProposal->status} and cannot be accepted.");
+            }
+
+            if (CarbonImmutable::now()->isAfter($lockedProposal->expires_at)) {
+                $lockedProposal->update(['status' => 'expired']);
+                throw new \DomainException('Restructuring proposal has expired.');
+            }
+
+            $loan = Loan::query()->where('id', $lockedProposal->loan_id)->lockForUpdate()->firstOrFail();
+            $now = CarbonImmutable::now();
+
+            // 1. Mark proposal as accepted
+            $lockedProposal->update([
+                'status'      => 'accepted',
+                'accepted_at' => $now,
+            ]);
+
+            // 2. Post ledger entry clearing forgiven penalties
+            if (bccomp((string) $lockedProposal->forgiven_penalties, '0.00', 2) > 0) {
+                $latest = LoanLedgerEntry::where('loan_id', $loan->id)->latest('id')->first();
+                $newPrincipal = $latest ? $latest->running_principal_balance : $loan->principal_disbursed;
+                $newInterest = $latest ? $latest->running_interest_balance : '0.00';
+                $newTotal = bcadd((string) $newPrincipal, (string) $newInterest, 2);
+
+                LoanLedgerEntry::create([
+                    'loan_id'                   => $loan->id,
+                    'entry_type'                => 'restructure_waiver',
+                    'debit'                     => '0.00',
+                    'credit'                    => $lockedProposal->forgiven_penalties,
+                    'running_principal_balance' => $newPrincipal,
+                    'running_interest_balance'  => $newInterest,
+                    'running_fees_balance'      => '0.00',
+                    'total_running_balance'     => $newTotal,
+                    'reference'                 => $lockedProposal->proposal_code,
+                    'notes'                     => sprintf(
+                        'Penalty fee waiver of KES %s applied under Restructure Agreement #%s',
+                        $lockedProposal->forgiven_penalties,
+                        $lockedProposal->proposal_code
+                    ),
+                ]);
+            }
+
+            // 3. Update Loan status and extended due date
+            $loan->update([
+                'status'   => LoanStatus::RESTRUCTURED,
+                'due_date' => CarbonImmutable::parse($loan->due_date ?? $now)->addDays($lockedProposal->tenure_extension_days),
+            ]);
+
+            // 4. Dispatch cryptographically chained Outbox Event
+            $prevEvent = OutboxEvent::query()->latest('id')->first();
+            $prevHash = $prevEvent ? $prevEvent->current_event_hash : str_repeat('0', 64);
+
+            $payload = [
+                'loan_id'            => $loan->id,
+                'loan_number'        => $loan->loan_number,
+                'proposal_code'      => $lockedProposal->proposal_code,
+                'forgiven_penalties' => (string) $lockedProposal->forgiven_penalties,
+                'extended_days'      => $lockedProposal->tenure_extension_days,
+                'restructured_at'    => $now->toIso8601String(),
+            ];
+
+            $currentHash = hash('sha256', $prevHash . 'loan.restructured' . json_encode($payload));
+
+            OutboxEvent::create([
+                'aggregate_type'      => Loan::class,
+                'aggregate_id'        => $loan->id,
+                'event_name'          => 'loan.restructured',
+                'payload'             => $payload,
+                'previous_event_hash' => $prevHash,
+                'current_event_hash'  => $currentHash,
+                'is_published'        => false,
+                'retry_count'         => 0,
+            ]);
+
+            AuditTrail::create([
+                'user_id'        => auth()->id(),
+                'action'         => 'LOAN_RESTRUCTURED',
+                'auditable_type' => Loan::class,
+                'auditable_id'   => $loan->id,
+                'old_values'     => ['status' => $loan->getOriginal('status')],
+                'new_values'     => [
+                    'status'        => LoanStatus::RESTRUCTURED->value,
+                    'proposal_code' => $lockedProposal->proposal_code,
+                ],
+                'ip_address'     => request()->ip() ?? '127.0.0.1',
+                'user_agent'     => request()->userAgent() ?? 'System/CLI',
+            ]);
+
+            return $loan;
+        });
+    }
+}===== app\Services\Financial\Mpesa\DarajaClient.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Financial\Mpesa;
+
+use App\Exceptions\Fintech\MpesaAuthenticationException;
+use App\Models\MpesaApiToken;
+use Carbon\CarbonImmutable;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+
+final class DarajaClient
+{
+    private const CACHE_KEY = 'safaricom_daraja_access_token';
+
+    /**
+     * Retrieves an active Safaricom Daraja Bearer access token, utilizing cache.
+     */
+    public function getAccessToken(): string
+    {
+        // 1. Return from memory/Redis cache if still valid
+        $cachedToken = Cache::get(self::CACHE_KEY);
+        if (is_string($cachedToken) && $cachedToken !== '') {
+            return $cachedToken;
+        }
+
+        // 2. Fetch fresh token from Safaricom
+        return $this->fetchFreshAccessToken();
+    }
+
+    /**
+     * Resolves the active base URL based on config/environment.
+     */
+    public function getBaseUrl(): string
+    {
+        $env = config('mpesa.env', 'sandbox');
+        return config("mpesa.endpoints.{$env}", 'https://sandbox.safaricom.co.ke');
+    }
+
+    /**
+     * Requests a fresh OAuth token from Safaricom and caches it.
+     *
+     * @throws MpesaAuthenticationException
+     */
+    public function fetchFreshAccessToken(): string
+    {
+        $consumerKey = (string) config('mpesa.consumer_key');
+        $consumerSecret = (string) config('mpesa.consumer_secret');
+        $timeout = (int) config('mpesa.http_timeout_seconds', 15);
+
+        $url = $this->getBaseUrl() . '/oauth/v1/generate?grant_type=client_credentials';
+
+        $response = Http::withBasicAuth($consumerKey, $consumerSecret)
+            ->timeout($timeout)
+            ->acceptJson()
+            ->get($url);
+
+        if (!$response->successful()) {
+            Log::channel('daily')->error('Safaricom Daraja OAuth Token Request Failed', [
+                'status' => $response->status(),
+                'body'   => $response->body(),
+            ]);
+
+            throw new MpesaAuthenticationException(
+                statusCode: $response->status(),
+                responseBody: $response->body()
+            );
+        }
+
+        $data = $response->json();
+        $token = (string) ($data['access_token'] ?? '');
+        $expiresIn = (int) ($data['expires_in'] ?? 3599);
+
+        if ($token === '') {
+            throw new MpesaAuthenticationException(
+                statusCode: 500,
+                responseBody: 'Safaricom returned 200 OK but access_token was missing from JSON payload.'
+            );
+        }
+
+        // Apply 2-minute safety buffer before token expiration
+        $buffer = (int) config('mpesa.token_cache_buffer_seconds', 120);
+        $ttlSeconds = max(60, $expiresIn - $buffer);
+
+        // Store in Laravel Cache
+        Cache::put(self::CACHE_KEY, $token, CarbonImmutable::now()->addSeconds($ttlSeconds));
+
+        // Persist to database table for auditing token lifecycles
+        MpesaApiToken::create([
+            'access_token' => $token,
+            'expires_in'   => $expiresIn,
+            'expires_at'   => CarbonImmutable::now()->addSeconds($expiresIn),
+        ]);
+
+        Log::channel('daily')->info('Safaricom Daraja access token successfully refreshed and cached', [
+            'expires_in'  => $expiresIn,
+            'ttl_seconds' => $ttlSeconds,
+        ]);
+
+        return $token;
+    }
+}
