@@ -1,0 +1,1012 @@
+===== app\Services\Underwriting\CreditUnderwritingEngine.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Underwriting;
+
+use App\Enums\RiskBand;
+use App\Models\Borrower;
+use App\Models\BorrowerFinancialProfile;
+use App\Models\CrbInquiryRecord;
+use App\Models\CreditRuleEvaluation;
+use App\Models\LoanApplication;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+
+final class CreditUnderwritingEngine
+{
+    /**
+     * Evaluates a loan application against statutory and risk underwriting rules.
+     * Assigns risk bands, calculates credit limits, and records detailed rule logs.
+     *
+     * @param int $applicationId
+     * @return array Summary of underwriting decision and assigned terms
+     */
+    public function evaluateApplication(int $applicationId): array
+    {
+        return DB::transaction(function () use ($applicationId) {
+            /** @var LoanApplication $application */
+            $application = LoanApplication::where('id', $applicationId)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            /** @var Borrower $borrower */
+            $borrower = Borrower::where('id', $application->borrower_id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            /** @var BorrowerFinancialProfile|null $profile */
+            $profile = BorrowerFinancialProfile::where('borrower_id', $borrower->id)->first();
+
+            /** @var CrbInquiryRecord|null $latestCrb */
+            $latestCrb = CrbInquiryRecord::where('borrower_id', $borrower->id)
+                ->orderByDesc('id')
+                ->first();
+
+            $passedCount = 0;
+            $failedCount = 0;
+
+            // 1. Hard Rule: Borrower Blacklist Inspection
+            $isBlacklisted = $borrower->is_blacklisted;
+            $this->recordRuleEvaluation(
+                $application->id,
+                'RULE_01_BLACKLIST_CHECK',
+                'Borrower Fraud & Blacklist Inspection',
+                ! $isBlacklisted ? 'PASSED' : 'FAILED',
+                $isBlacklisted ? 'Blacklisted' : 'Clean',
+                'Clean'
+            );
+            $isBlacklisted ? $failedCount++ : $passedCount++;
+
+            // 2. Hard Rule: CRB Defaulted Accounts Audit
+            $defaultedAccounts = $latestCrb ? $latestCrb->defaulted_accounts_count : 0;
+            $crbPassed = $defaultedAccounts === 0;
+            $this->recordRuleEvaluation(
+                $application->id,
+                'RULE_02_CRB_DEFAULTS',
+                'CRB Active NPL/Defaulted Accounts Check',
+                $crbPassed ? 'PASSED' : 'FAILED',
+                (string) $defaultedAccounts,
+                '0'
+            );
+            $crbPassed ? $passedCount++ : $failedCount++;
+
+            // 3. Hard Rule: Debt-To-Income (DTI) Ratio Guard (Max 50.00%)
+            $monthlyIncome = $profile ? (string) $profile->monthly_income : '0.00';
+            $monthlyExpenses = $profile ? (string) $profile->monthly_expenses : '0.00';
+            $existingDebts = $profile ? (string) $profile->existing_debt_obligations : '0.00';
+
+            $totalObligations = bcadd($monthlyExpenses, $existingDebts, 2);
+            $dtiRatio = bccomp($monthlyIncome, '0.00', 2) > 0
+                ? bcdiv($totalObligations, $monthlyIncome, 4)
+                : '1.0000';
+
+            $dtiPassed = bccomp($dtiRatio, '0.5000', 4) <= 0;
+            $dtiPercentage = bcmul($dtiRatio, '100', 2).'%';
+
+            $this->recordRuleEvaluation(
+                $application->id,
+                'RULE_03_DTI_RATIO',
+                'Debt-To-Income Ratio Below 50%',
+                $dtiPassed ? 'PASSED' : 'FAILED',
+                $dtiPercentage,
+                '<= 50.00%'
+            );
+            $dtiPassed ? $passedCount++ : $failedCount++;
+
+            // 4. Hard Rule: M-Pesa Cash Flow Capacity Test (Min 1.5x Requested Principal)
+            $mpesaInflow = $profile ? (string) $profile->mpesa_average_monthly_inflow : '0.00';
+            $requestedPrincipal = (string) $application->requested_principal;
+
+            $requiredInflow = bcmul($requestedPrincipal, '1.50', 2);
+            $inflowPassed = bccomp($mpesaInflow, $requiredInflow, 2) >= 0;
+
+            $this->recordRuleEvaluation(
+                $application->id,
+                'RULE_04_MPESA_INFLOW_CAPACITY',
+                'M-Pesa Average Monthly Inflow Capacity',
+                $inflowPassed ? 'PASSED' : 'FAILED',
+                "KES {$mpesaInflow}",
+                ">= KES {$requiredInflow}"
+            );
+            $inflowPassed ? $passedCount++ : $failedCount++;
+
+            // Decision Matrix & Term Assignment
+            if ($failedCount > 0) {
+                $status = 'rejected';
+                $riskBand = RiskBand::D;
+                $approvedLimit = '0.00';
+                $rejectionReason = "Failed {$failedCount} underwriting risk evaluation rules.";
+            } else {
+                $status = 'approved_pending_checker';
+                $rejectionReason = null;
+
+                // Score-Based Risk Band Assignment
+                $crbScore = $latestCrb ? $latestCrb->credit_score : 600;
+
+                if ($crbScore >= 750) {
+                    $riskBand = RiskBand::A;
+                    $approvedLimit = bcmul($requestedPrincipal, '1.25', 2);
+                } elseif ($crbScore >= 650) {
+                    $riskBand = RiskBand::B;
+                    $approvedLimit = $requestedPrincipal;
+                } else {
+                    $riskBand = RiskBand::C;
+                    $approvedLimit = bcmul($requestedPrincipal, '0.75', 2);
+                }
+            }
+
+            // Update Application state
+            $application->update([
+                'status' => $status,
+                'rejection_reason' => $rejectionReason,
+            ]);
+
+            // Update Borrower risk profile and credit limit
+            $borrower->update([
+                'risk_band' => $riskBand,
+                'credit_limit' => $approvedLimit,
+            ]);
+
+            Log::channel('fintech')->info("Underwriting complete for Application #{$application->id}: Status = {$status}, Risk Band = {$riskBand->value}, Approved Limit = KES {$approvedLimit}");
+
+            return [
+                'application_id' => $application->id,
+                'status' => $status,
+                'risk_band' => $riskBand->value,
+                'approved_limit' => $approvedLimit,
+                'rules_passed' => $passedCount,
+                'rules_failed' => $failedCount,
+            ];
+        });
+    }
+
+    private function recordRuleEvaluation(
+        int $applicationId,
+        string $identifier,
+        string $description,
+        string $status,
+        string $actualValue,
+        string $thresholdValue
+    ): void {
+        CreditRuleEvaluation::create([
+            'loan_application_id' => $applicationId,
+            'rule_identifier' => $identifier,
+            'rule_description' => $description,
+            'status' => $status,
+            'actual_value' => $actualValue,
+            'threshold_value' => $thresholdValue,
+        ]);
+    }
+}===== app\Services\Financial\Mpesa\B2cDisbursementService.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Financial\Mpesa;
+
+use App\Enums\LoanStatus;
+use App\Models\AuditTrail;
+use App\Models\Loan;
+use App\Models\LoanLedgerEntry;
+use App\Models\MpesaB2cDisbursement;
+use App\Models\OutboxEvent;
+use App\Services\Financial\GeneralLedgerService;
+use Carbon\CarbonImmutable;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+
+final class B2cDisbursementService
+{
+    public function __construct(
+        private readonly DarajaClient $darajaClient,
+        private readonly SimSwapProtectionService $simSwapService,
+        private readonly GeneralLedgerService $glService
+    ) {}
+
+    /**
+     * Initiates an outbound M-Pesa B2C payment to the borrower's wallet.
+     */
+    public function initiateDisbursement(Loan $loan, ?CarbonImmutable $mockSimSwapTimestamp = null): MpesaB2cDisbursement
+    {
+        return DB::transaction(function () use ($loan, $mockSimSwapTimestamp): MpesaB2cDisbursement {
+            $lockedLoan = Loan::query()->where('id', $loan->id)->lockForUpdate()->firstOrFail();
+            $phoneNumber = (string) $lockedLoan->borrower->phone_number;
+
+            // 1. Guard against SIM-Swap Fraud
+            $this->simSwapService->assertPhoneIsSafeForDisbursement($phoneNumber, $mockSimSwapTimestamp);
+
+            // 2. Prepare Daraja B2C Payload
+            $token = $this->darajaClient->getAccessToken();
+            $url = $this->darajaClient->getBaseUrl() . '/mpesa/b2c/v1/paymentrequest';
+            $originatorConversationId = 'B2C-' . strtoupper(Str::random(12));
+
+            $payload = [
+                'InitiatorName'          => (string) config('mpesa.initiator_name', 'testapi'),
+                'SecurityCredential'     => (string) config('mpesa.security_credential', 'testcredential'),
+                'CommandID'              => 'BusinessPayment',
+                'Amount'                 => (int) round((float) $lockedLoan->principal_disbursed),
+                'PartyA'                 => (string) config('mpesa.b2c_shortcode', '600000'),
+                'PartyB'                 => $phoneNumber,
+                'Remarks'                => 'Loan Disbursement ' . $lockedLoan->loan_number,
+                'QueueTimeOutURL'        => url('/api/v1/mpesa/b2c-timeout'),
+                'ResultURL'              => url('/api/v1/mpesa/b2c-result'),
+                'Occasion'               => 'Disbursement',
+                'OriginatorConversationID' => $originatorConversationId,
+            ];
+
+            $response = Http::withToken($token)
+                ->timeout((int) config('mpesa.http_timeout_seconds', 15))
+                ->post($url, $payload);
+
+            $responseData = $response->json() ?? [];
+            $conversationId = (string) ($responseData['ConversationID'] ?? '');
+            $responseCode = (string) ($responseData['ResponseCode'] ?? $response->status());
+            $responseDescription = (string) ($responseData['ResponseDescription'] ?? $response->body());
+
+            // 3. Persist initial B2C disbursement record
+            $disbursement = MpesaB2cDisbursement::create([
+                'loan_id'                    => $lockedLoan->id,
+                'originator_conversation_id' => $originatorConversationId,
+                'conversation_id'            => $conversationId !== '' ? $conversationId : null,
+                'transaction_id'             => null,
+                'recipient_phone'            => $phoneNumber,
+                'amount'                     => $lockedLoan->principal_disbursed,
+                'status'                     => $response->successful() ? 'initiated' : 'failed',
+                'response_code'              => $responseCode,
+                'response_description'       => $responseDescription,
+                'disbursed_at'               => null,
+            ]);
+
+            AuditTrail::create([
+                'user_id'        => auth()->id(),
+                'action'         => 'MPESA_B2C_DISBURSEMENT_INITIATED',
+                'auditable_type' => MpesaB2cDisbursement::class,
+                'auditable_id'   => $disbursement->id,
+                'old_values'     => null,
+                'new_values'     => [
+                    'amount'      => (string) $lockedLoan->principal_disbursed,
+                    'phone'       => $phoneNumber,
+                    'origin_conv' => $originatorConversationId,
+                ],
+                'ip_address'     => request()->ip() ?? '127.0.0.1',
+                'user_agent'     => request()->userAgent() ?? 'System/CLI',
+            ]);
+
+            return $disbursement;
+        });
+    }
+
+    /**
+     * Processes the asynchronous Result callback from Safaricom B2C.
+     *
+     * @param array<string, mixed> $callbackData
+     */
+    public function processCallback(array $callbackData): MpesaB2cDisbursement
+    {
+        return DB::transaction(function () use ($callbackData): MpesaB2cDisbursement {
+            $result = $callbackData['Result'] ?? $callbackData;
+            $conversationId = (string) ($result['ConversationID'] ?? '');
+            $originatorConversationId = (string) ($result['OriginatorConversationID'] ?? '');
+            $resultCode = (int) ($result['ResultCode'] ?? -1);
+            $resultDesc = (string) ($result['ResultDesc'] ?? 'No description');
+            $transactionId = (string) ($result['TransactionID'] ?? 'TXN-' . Str::random(10));
+
+            $disbursement = MpesaB2cDisbursement::query()
+                ->where('originator_conversation_id', $originatorConversationId)
+                ->orWhere('conversation_id', $conversationId)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $loan = Loan::query()->where('id', $disbursement->loan_id)->lockForUpdate()->firstOrFail();
+            $now = CarbonImmutable::now();
+
+            if ($resultCode === 0) {
+                // SUCCESS: Funds delivered to borrower's phone wallet
+                $disbursement->update([
+                    'status'               => 'successful',
+                    'transaction_id'       => $transactionId,
+                    'response_code'        => (string) $resultCode,
+                    'response_description' => $resultDesc,
+                    'disbursed_at'         => $now,
+                ]);
+
+                $loan->update([
+                    'status'       => LoanStatus::DISBURSED,
+                    'disbursed_at' => $now,
+                ]);
+
+                // Create initial immutable debit in Loan Ledger
+                LoanLedgerEntry::create([
+                    'loan_id'                   => $loan->id,
+                    'entry_type'                => 'disbursement',
+                    'debit'                     => $loan->principal_disbursed,
+                    'credit'                    => '0.00',
+                    'running_principal_balance' => $loan->principal_disbursed,
+                    'running_interest_balance'  => '0.00',
+                    'running_fees_balance'      => '0.00',
+                    'total_running_balance'     => $loan->principal_disbursed,
+                    'reference'                 => $transactionId,
+                    'notes'                     => 'Disbursement confirmed via M-Pesa B2C Receipt ' . $transactionId,
+                ]);
+
+                // Double-Entry GL Posting: Debit Loans Receivable, Credit M-Pesa Settlement
+                $this->glService->recordLoanDisbursementPosting($loan, (string) $loan->principal_disbursed);
+
+                // Cryptographically chained Outbox Event
+                $prevEvent = OutboxEvent::query()->latest('id')->first();
+                $prevHash = $prevEvent ? $prevEvent->current_event_hash : str_repeat('0', 64);
+
+                $payload = [
+                    'loan_id'         => $loan->id,
+                    'loan_number'     => $loan->loan_number,
+                    'disbursement_id' => $disbursement->id,
+                    'transaction_id'  => $transactionId,
+                    'amount'          => (string) $loan->principal_disbursed,
+                    'phone'           => $disbursement->recipient_phone,
+                    'disbursed_at'    => $now->toIso8601String(),
+                ];
+
+                $currentHash = hash('sha256', $prevHash . 'loan.disbursed' . json_encode($payload));
+
+                OutboxEvent::create([
+                    'aggregate_type'      => Loan::class,
+                    'aggregate_id'        => $loan->id,
+                    'event_name'          => 'loan.disbursed',
+                    'payload'             => $payload,
+                    'previous_event_hash' => $prevHash,
+                    'current_event_hash'  => $currentHash,
+                    'is_published'        => false,
+                    'retry_count'         => 0,
+                ]);
+            } else {
+                // FAILURE from Safaricom (e.g. Insufficient Utility Balance)
+                $disbursement->update([
+                    'status'               => 'failed',
+                    'response_code'        => (string) $resultCode,
+                    'response_description' => $resultDesc,
+                ]);
+            }
+
+            return $disbursement;
+        });
+    }
+}===== app\Jobs\DispatchMpesaB2cDisbursementJob.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Jobs;
+
+use App\Models\Loan;
+use App\Services\Financial\Mpesa\B2cDisbursementService;
+use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Foundation\Bus\Dispatchable;
+use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\SerializesModels;
+
+final class DispatchMpesaB2cDisbursementJob implements ShouldQueue
+{
+    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+
+    public int $tries = 3;
+    public int $backoff = 30;
+
+    public function __construct(public readonly Loan $loan) {}
+
+    public function handle(B2cDisbursementService $service): void
+    {
+        $service->initiateDisbursement($this->loan);
+    }
+}===== app\Models\LoanApplication.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+
+final class LoanApplication extends Model
+{
+    protected $fillable = [
+        'application_number',
+        'borrower_id',
+        'loan_product_id',
+        'requested_principal',
+        'requested_tenure_days',
+        'status',
+        'underwriter_id',
+        'rejection_reason',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'requested_principal' => 'decimal:2',
+        ];
+    }
+
+    public function borrower(): BelongsTo
+    {
+        return $this->belongsTo(Borrower::class, 'borrower_id');
+    }
+
+    public function product(): BelongsTo
+    {
+        return $this->belongsTo(LoanProduct::class, 'loan_product_id');
+    }
+
+    public function underwriter(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'underwriter_id');
+    }
+
+    public function ruleEvaluations(): HasMany
+    {
+        return $this->hasMany(CreditRuleEvaluation::class, 'loan_application_id');
+    }
+
+    public function loan(): HasOne
+    {
+        return $this->hasOne(Loan::class, 'loan_application_id');
+    }
+}===== app\Models\LoanProduct.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+
+final class LoanProduct extends Model
+{
+    protected $fillable = [
+        'name',
+        'product_code',
+        'min_principal',
+        'max_principal',
+        'default_tenure_days',
+        'interest_calculation_method',
+        'is_active',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'min_principal' => 'decimal:2',
+            'max_principal' => 'decimal:2',
+            'is_active'     => 'boolean',
+        ];
+    }
+
+    public function interestRules(): HasMany
+    {
+        return $this->hasMany(ProductInterestRule::class, 'loan_product_id');
+    }
+
+    public function feeMatrices(): HasMany
+    {
+        return $this->hasMany(FeeMatrix::class, 'loan_product_id');
+    }
+
+    public function penaltyPolicies(): HasMany
+    {
+        return $this->hasMany(PenaltyPolicy::class, 'loan_product_id');
+    }
+
+    public function loans(): HasMany
+    {
+        return $this->hasMany(Loan::class, 'loan_product_id');
+    }
+}===== app\Models\BorrowerFinancialProfile.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+final class BorrowerFinancialProfile extends Model
+{
+    protected $fillable = [
+        'borrower_id',
+        'monthly_income',
+        'monthly_expenses',
+        'mpesa_average_monthly_inflow',
+        'existing_debt_obligations',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'monthly_income'               => 'decimal:2',
+            'monthly_expenses'              => 'decimal:2',
+            'mpesa_average_monthly_inflow' => 'decimal:2',
+            'existing_debt_obligations'    => 'decimal:2',
+        ];
+    }
+
+    public function borrower(): BelongsTo
+    {
+        return $this->belongsTo(Borrower::class, 'borrower_id');
+    }
+}===== app\Enums\UserRole.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Enums;
+
+enum UserRole: string
+{
+    case LenderAdmin = 'lender_admin';
+    case CreditOfficer = 'credit_officer';
+    case CollectionsOfficer = 'collections_officer';
+    case FinanceOfficer = 'finance_officer';
+    case Borrower = 'borrower';
+
+    /** @return list<string> */
+    public static function staff(): array
+    {
+        return [
+            self::LenderAdmin->value,
+            self::CreditOfficer->value,
+            self::CollectionsOfficer->value,
+            self::FinanceOfficer->value,
+        ];
+    }
+
+    /** Pipe-separated list, the format Spatie's role middleware expects. */
+    public static function staffPipe(): string
+    {
+        return implode('|', self::staff());
+    }
+
+    /**
+     * Roles allowed to approve or reject maker-checker requests.
+     *
+     * @return list<string>
+     */
+    public static function approvers(): array
+    {
+        return [
+            self::LenderAdmin->value,
+            self::FinanceOfficer->value,
+        ];
+    }
+
+    public static function approversPipe(): string
+    {
+        return implode('|', self::approvers());
+    }
+
+    /**
+     * Roles allowed to open the read-only collections workbench.
+     *
+     * @return list<string>
+     */
+    public static function collectionsViewers(): array
+    {
+        return [
+            self::LenderAdmin->value,
+            self::CollectionsOfficer->value,
+            self::FinanceOfficer->value,
+        ];
+    }
+
+    public static function collectionsViewersPipe(): string
+    {
+        return implode('|', self::collectionsViewers());
+    }
+}===== resources\views\components\layouts\lender.blade.php ===== 
+@props(['title' => 'Dashboard'])
+@php
+    $user = auth()->user();
+    $roleLabel = \Illuminate\Support\Str::headline((string) $user->getRoleNames()->first());
+    $nav = [
+        ['label' => 'Dashboard', 'route' => 'lender.dashboard', 'roles' => null],
+        ['label' => 'Review desk', 'route' => 'lender.maker-checker.index', 'roles' => \App\Enums\UserRole::approvers()],
+        ['label' => 'Collections', 'route' => 'lender.collections.index', 'roles' => \App\Enums\UserRole::collectionsViewers()],
+    ];
+    $nav = array_values(array_filter(
+        $nav,
+        fn (array $item): bool => ($item['roles'] ?? null) === null || $user->hasAnyRole($item['roles'])
+    ));
+@endphp
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ $title }} | {{ config('app.name') }}</title>
+    @vite(['resources/css/app.css', 'resources/js/app.js'])
+</head>
+<body class="bg-paper font-sans text-ink antialiased" x-data="{ open: false }">
+    <div x-show="open" x-cloak x-on:click="open = false" class="fixed inset-0 z-20 bg-ink/50 lg:hidden"></div>
+
+    <aside class="fixed inset-y-0 left-0 z-30 flex w-64 flex-col bg-brand-900 text-brand-100 transition-transform duration-200 motion-reduce:transition-none lg:translate-x-0"
+           x-bind:class="open ? 'translate-x-0' : '-translate-x-full'">
+        <div class="px-6 py-5 text-lg font-semibold text-white">{{ config('app.name') }}</div>
+
+        <nav class="flex-1 space-y-1 px-3" aria-label="Main">
+            @foreach ($nav as $item)
+                <a href="{{ route($item['route']) }}"
+                   @if (request()->routeIs($item['route'])) aria-current="page" @endif
+                   @class([
+                       'flex items-center rounded-md px-3 py-2 text-sm font-medium',
+                       'bg-white/10 text-white' => request()->routeIs($item['route']),
+                       'hover:bg-white/5' => ! request()->routeIs($item['route']),
+                   ])>{{ $item['label'] }}</a>
+            @endforeach
+        </nav>
+
+        <div class="border-t border-white/10 px-6 py-4">
+            <p class="truncate text-sm font-medium text-white">{{ $user->name }}</p>
+            <p class="text-xs">{{ $roleLabel }}</p>
+            <form method="POST" action="{{ route('logout') }}" class="mt-3">
+                @csrf
+                <button type="submit" class="text-sm underline-offset-4 hover:text-white hover:underline">Sign out</button>
+            </form>
+        </div>
+    </aside>
+
+    <div class="lg:pl-64">
+        <header class="sticky top-0 z-10 flex h-14 items-center gap-3 border-b border-line bg-paper/90 px-4 backdrop-blur sm:px-8">
+            <button type="button" class="-ml-1 rounded-md p-2 lg:hidden" x-on:click="open = true" aria-label="Open menu">
+                <svg class="h-5 w-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14"/></svg>
+            </button>
+            <h1 class="text-base font-semibold">{{ $title }}</h1>
+        </header>
+
+        <main class="px-4 py-6 sm:px-8">
+            {{ $slot }}
+        </main>
+    </div>
+</body>
+</html>===== tests\Feature\CreditUnderwritingEngineTest.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace Tests\Feature;
+
+use App\Enums\RiskBand;
+use App\Models\Borrower;
+use App\Models\BorrowerFinancialProfile;
+use App\Models\CrbInquiryRecord;
+use App\Models\LoanApplication;
+use App\Models\LoanProduct;
+use App\Services\Underwriting\CreditUnderwritingEngine;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+uses(TestCase::class, RefreshDatabase::class);
+
+test('approves application and assigns risk band A with elevated limit for high credit score', function () {
+    /** @var Borrower $borrower */
+    $borrower = Borrower::create([
+        'full_name' => 'Dr. Mercy Chebet',
+        'id_number' => '29810294',
+        'phone_number' => '254711889900',
+        'credit_limit' => '0.00',
+        'risk_band' => RiskBand::C,
+        'is_blacklisted' => false,
+    ]);
+
+    BorrowerFinancialProfile::create([
+        'borrower_id' => $borrower->id,
+        'monthly_income' => '150000.00',
+        'monthly_expenses' => '40000.00',
+        'mpesa_average_monthly_inflow' => '120000.00',
+        'existing_debt_obligations' => '10000.00',
+    ]);
+
+    CrbInquiryRecord::create([
+        'borrower_id' => $borrower->id,
+        'bureau_name' => 'METROPOL_CRB',
+        'credit_score' => 780,
+        'open_accounts_count' => 2,
+        'defaulted_accounts_count' => 0,
+        'total_npl_amount' => '0.00',
+        'inquiry_reference' => 'CRB_REF_99812',
+    ]);
+
+    /** @var LoanProduct $product */
+    $product = LoanProduct::create([
+        'name' => 'SME Working Capital',
+        'product_code' => 'SME_WC',
+        'min_principal' => '5000.00',
+        'max_principal' => '100000.00',
+        'default_tenure_days' => 30,
+        'interest_calculation_method' => 'FLAT_RATE',
+        'is_active' => true,
+    ]);
+
+    /** @var LoanApplication $application */
+    $application = LoanApplication::create([
+        'application_number' => 'APP_TEST_001',
+        'borrower_id' => $borrower->id,
+        'loan_product_id' => $product->id,
+        'requested_principal' => '20000.00',
+        'requested_tenure_days' => 30,
+        'status' => 'pending',
+    ]);
+
+    /** @var CreditUnderwritingEngine $engine */
+    $engine = $this->app->make(CreditUnderwritingEngine::class);
+
+    $result = $engine->evaluateApplication($application->id);
+
+    expect($result['status'])->toBe('approved_pending_checker')
+        ->and($result['risk_band'])->toBe('A')
+        ->and($result['approved_limit'])->toBe('25000.00') // 125% of 20,000.00
+        ->and($result['rules_passed'])->toBe(4)
+        ->and($result['rules_failed'])->toBe(0);
+
+    $this->assertDatabaseHas('loan_applications', [
+        'id' => $application->id,
+        'status' => 'approved_pending_checker',
+    ]);
+
+    $this->assertDatabaseHas('credit_rule_evaluations', [
+        'loan_application_id' => $application->id,
+        'rule_identifier' => 'RULE_01_BLACKLIST_CHECK',
+        'status' => 'PASSED',
+    ]);
+});
+
+test('rejects application when CRB defaults are present and assigns Risk Band D', function () {
+    /** @var Borrower $borrower */
+    $borrower = Borrower::create([
+        'full_name' => 'Samuel Omondi',
+        'id_number' => '10928374',
+        'phone_number' => '254700112233',
+        'credit_limit' => '0.00',
+        'risk_band' => RiskBand::C,
+        'is_blacklisted' => false,
+    ]);
+
+    BorrowerFinancialProfile::create([
+        'borrower_id' => $borrower->id,
+        'monthly_income' => '80000.00',
+        'monthly_expenses' => '30000.00',
+        'mpesa_average_monthly_inflow' => '50000.00',
+        'existing_debt_obligations' => '5000.00',
+    ]);
+
+    CrbInquiryRecord::create([
+        'borrower_id' => $borrower->id,
+        'bureau_name' => 'TRANSUNION_CRB',
+        'credit_score' => 510,
+        'open_accounts_count' => 3,
+        'defaulted_accounts_count' => 2, // Defaulted accounts trigger failure
+        'total_npl_amount' => '45000.00',
+        'inquiry_reference' => 'CRB_REF_77123',
+    ]);
+
+    /** @var LoanProduct $product */
+    $product = LoanProduct::create([
+        'name' => 'Personal Salary Advance',
+        'product_code' => 'SAL_ADV',
+        'min_principal' => '1000.00',
+        'max_principal' => '50000.00',
+        'default_tenure_days' => 15,
+        'interest_calculation_method' => 'FLAT_RATE',
+        'is_active' => true,
+    ]);
+
+    /** @var LoanApplication $application */
+    $application = LoanApplication::create([
+        'application_number' => 'APP_TEST_002',
+        'borrower_id' => $borrower->id,
+        'loan_product_id' => $product->id,
+        'requested_principal' => '15000.00',
+        'requested_tenure_days' => 15,
+        'status' => 'pending',
+    ]);
+
+    /** @var CreditUnderwritingEngine $engine */
+    $engine = $this->app->make(CreditUnderwritingEngine::class);
+
+    $result = $engine->evaluateApplication($application->id);
+
+    expect($result['status'])->toBe('rejected')
+        ->and($result['risk_band'])->toBe('D')
+        ->and($result['approved_limit'])->toBe('0.00')
+        ->and($result['rules_failed'])->toBeGreaterThanOrEqual(1);
+
+    $this->assertDatabaseHas('loan_applications', [
+        'id' => $application->id,
+        'status' => 'rejected',
+    ]);
+});===== tests\Feature\B2cDisbursementTest.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use App\Enums\LoanStatus;
+use App\Enums\RiskBand;
+use App\Exceptions\Fintech\SimSwapRiskDetectedException;
+use App\Models\Borrower;
+use App\Models\ChartOfAccount;
+use App\Models\Loan;
+use App\Models\LoanApplication;
+use App\Models\LoanLedgerEntry;
+use App\Models\LoanProduct;
+use App\Models\MpesaB2cDisbursement;
+use App\Models\OutboxEvent;
+use App\Services\Financial\Mpesa\B2cDisbursementService;
+use Carbon\CarbonImmutable;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
+use Tests\TestCase;
+
+uses(TestCase::class, RefreshDatabase::class);
+
+beforeEach(function (): void {
+    // Seed Chart of Accounts for GL integration
+    ChartOfAccount::create(['account_code' => '1010', 'account_name' => 'M-Pesa Settlement Account', 'account_type' => 'ASSET', 'currency' => 'KES', 'is_active' => true]);
+    ChartOfAccount::create(['account_code' => '1200', 'account_name' => 'Loans Receivable', 'account_type' => 'ASSET', 'currency' => 'KES', 'is_active' => true]);
+
+    $this->borrower = Borrower::create([
+        'full_name'      => 'Wanjiku Kamau',
+        'id_number'      => '28471928',
+        'phone_number'   => '254712345678',
+        'credit_limit'   => '50000.00',
+        'risk_band'      => RiskBand::B,
+        'is_blacklisted' => false,
+    ]);
+
+    $this->product = LoanProduct::create([
+        'name'                        => 'Biashara Micro Capital',
+        'product_code'                => 'BMC-30',
+        'min_principal'               => '1000.00',
+        'max_principal'               => '50000.00',
+        'default_tenure_days'         => 30,
+        'interest_calculation_method' => 'reducing_balance',
+        'is_active'                   => true,
+    ]);
+
+    $this->application = LoanApplication::create([
+        'application_number'   => 'APP-B2C-01',
+        'borrower_id'          => $this->borrower->id,
+        'loan_product_id'      => $this->product->id,
+        'requested_principal'  => '15000.00',
+        'requested_tenure_days'=> 30,
+        'status'               => 'approved',
+    ]);
+
+    $this->loan = Loan::create([
+        'loan_number'         => 'LN-B2C-01',
+        'loan_application_id' => $this->application->id,
+        'borrower_id'         => $this->borrower->id,
+        'loan_product_id'     => $this->product->id,
+        'principal_disbursed' => '15000.00',
+        'annual_interest_rate'=> '15.00',
+        'tenure_days'         => 30,
+        'status'              => LoanStatus::APPROVAL_HOLD,
+        'disbursed_at'        => null,
+        'due_date'            => null,
+        'is_in_duplum_locked' => false,
+    ]);
+
+    $this->service = app(B2cDisbursementService::class);
+});
+
+it('initiates mpesa b2c disbursement successfully when phone line is clean', function (): void {
+    Http::fake([
+        '*/oauth/v1/generate*' => Http::response(['access_token' => 'TEST_TOKEN', 'expires_in' => 3599], 200),
+        '*/mpesa/b2c/v1/paymentrequest*' => Http::response([
+            'ConversationID'           => 'AG_20261016_TEST123',
+            'OriginatorConversationID' => 'B2C-TEST-ORIG-123',
+            'ResponseCode'             => '0',
+            'ResponseDescription'      => 'Accept the service request successfully.',
+        ], 200),
+    ]);
+
+    $disbursement = $this->service->initiateDisbursement($this->loan);
+
+    expect($disbursement)->toBeInstanceOf(MpesaB2cDisbursement::class)
+        ->and($disbursement->status)->toBe('initiated')
+        ->and(number_format((float) $disbursement->amount, 2, '.', ''))->toBe('15000.00')
+        ->and($disbursement->recipient_phone)->toBe('254712345678');
+
+    Http::assertSent(fn ($req) => str_contains($req->url(), '/mpesa/b2c/v1/paymentrequest'));
+});
+
+it('blocks disbursement and throws SimSwapRiskDetectedException when SIM was swapped within 48 hours', function (): void {
+    Http::fake([
+        '*/oauth/v1/generate*' => Http::response(['access_token' => 'TEST_TOKEN', 'expires_in' => 3599], 200),
+    ]);
+
+    // Simulate SIM swapped 10 hours ago (< 48 hours quarantine window)
+    $swappedAt = CarbonImmutable::now()->subHours(10);
+
+    $this->service->initiateDisbursement($this->loan, $swappedAt);
+})->throws(SimSwapRiskDetectedException::class);
+
+it('processes successful b2c callback, updating loan, ledger, general ledger, and outbox', function (): void {
+    $disbursement = MpesaB2cDisbursement::create([
+        'loan_id'                    => $this->loan->id,
+        'originator_conversation_id' => 'B2C-CALLBACK-TEST-01',
+        'conversation_id'            => 'CONV-TEST-01',
+        'recipient_phone'            => '254712345678',
+        'amount'                     => '15000.00',
+        'status'                     => 'initiated',
+    ]);
+
+    $callbackPayload = [
+        'Result' => [
+            'ResultType'               => 0,
+            'ResultCode'               => 0,
+            'ResultDesc'               => 'The service request is processed successfully.',
+            'OriginatorConversationID' => 'B2C-CALLBACK-TEST-01',
+            'ConversationID'           => 'CONV-TEST-01',
+            'TransactionID'            => 'QHD7823HG1',
+        ],
+    ];
+
+    $updated = $this->service->processCallback($callbackPayload);
+
+    expect($updated->status)->toBe('successful')
+        ->and($updated->transaction_id)->toBe('QHD7823HG1');
+
+    // Assert Loan status transitioned to DISBURSED
+    $this->loan->refresh();
+    expect($this->loan->status)->toBe(LoanStatus::DISBURSED)
+        ->and($this->loan->disbursed_at)->not->toBeNull();
+
+    // Assert initial debit in Loan Ledger
+    $ledger = LoanLedgerEntry::where('loan_id', $this->loan->id)->first();
+    expect($ledger)->not->toBeNull()
+        ->and($ledger->entry_type)->toBe('disbursement')
+        ->and(number_format((float) $ledger->running_principal_balance, 2, '.', ''))->toBe('15000.00');
+
+    // Assert Outbox Event committed
+    $outbox = OutboxEvent::where('aggregate_id', $this->loan->id)
+        ->where('event_name', 'loan.disbursed')
+        ->first();
+
+    expect($outbox)->not->toBeNull()
+        ->and($outbox->payload['transaction_id'])->toBe('QHD7823HG1');
+});
+
+it('processes failed b2c callback without updating loan status or debiting ledger', function (): void {
+    $disbursement = MpesaB2cDisbursement::create([
+        'loan_id'                    => $this->loan->id,
+        'originator_conversation_id' => 'B2C-FAIL-TEST-01',
+        'conversation_id'            => 'CONV-FAIL-01',
+        'recipient_phone'            => '254712345678',
+        'amount'                     => '15000.00',
+        'status'                     => 'initiated',
+    ]);
+
+    $callbackPayload = [
+        'Result' => [
+            'ResultCode'               => 2001,
+            'ResultDesc'               => 'The initiator information is invalid.',
+            'OriginatorConversationID' => 'B2C-FAIL-TEST-01',
+            'ConversationID'           => 'CONV-FAIL-01',
+        ],
+    ];
+
+    $updated = $this->service->processCallback($callbackPayload);
+
+    expect($updated->status)->toBe('failed');
+
+    $this->loan->refresh();
+    expect($this->loan->status)->toBe(LoanStatus::APPROVAL_HOLD);
+    expect(LoanLedgerEntry::where('loan_id', $this->loan->id)->count())->toBe(0);
+});

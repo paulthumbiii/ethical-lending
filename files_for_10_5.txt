@@ -1,0 +1,1144 @@
+===== phpunit.xml ===== 
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+>
+    <testsuites>
+        <testsuite name="Unit">
+            <directory>tests/Unit</directory>
+        </testsuite>
+        <testsuite name="Feature">
+            <directory>tests/Feature</directory>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory>app</directory>
+        </include>
+    </source>
+    <php>
+        <env name="APP_ENV" value="testing"/>
+        <env name="APP_MAINTENANCE_DRIVER" value="file"/>
+        <env name="BCRYPT_ROUNDS" value="4"/>
+        <env name="BROADCAST_CONNECTION" value="null"/>
+        <env name="CACHE_STORE" value="array"/>
+        <env name="DB_CONNECTION" value="sqlite"/>
+        <env name="DB_DATABASE" value=":memory:"/>
+        <env name="DB_URL" value=""/>
+        <env name="MAIL_MAILER" value="array"/>
+        <env name="QUEUE_CONNECTION" value="sync"/>
+        <env name="SESSION_DRIVER" value="array"/>
+        <env name="PULSE_ENABLED" value="false"/>
+        <env name="TELESCOPE_ENABLED" value="false"/>
+        <env name="NIGHTWATCH_ENABLED" value="false"/>
+    </php>
+</phpunit>
+===== config\database.php ===== 
+<?php
+
+use Illuminate\Support\Str;
+use Pdo\Mysql;
+
+return [
+
+    /*
+    |--------------------------------------------------------------------------
+    | Default Database Connection Name
+    |--------------------------------------------------------------------------
+    |
+    | Here you may specify which of the database connections below you wish
+    | to use as your default connection for database operations. This is
+    | the connection which will be utilized unless another connection
+    | is explicitly specified when you execute a query / statement.
+    |
+    */
+
+    'default' => env('DB_CONNECTION', 'sqlite'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Database Connections
+    |--------------------------------------------------------------------------
+    |
+    | Below are all of the database connections defined for your application.
+    | An example configuration is provided for each database system which
+    | is supported by Laravel. You're free to add / remove connections.
+    |
+    */
+
+    'connections' => [
+
+        'sqlite' => [
+            'driver' => 'sqlite',
+            'url' => env('DB_URL'),
+            'database' => env('DB_DATABASE', database_path('database.sqlite')),
+            'prefix' => '',
+            'foreign_key_constraints' => env('DB_FOREIGN_KEYS', true),
+            'busy_timeout' => null,
+            'journal_mode' => null,
+            'synchronous' => null,
+            'transaction_mode' => 'DEFERRED',
+        ],
+
+        'mysql' => [
+            'driver' => 'mysql',
+            'url' => env('DB_URL'),
+            'host' => env('DB_HOST', '127.0.0.1'),
+            'port' => env('DB_PORT', '3306'),
+            'database' => env('DB_DATABASE', 'laravel'),
+            'username' => env('DB_USERNAME', 'root'),
+            'password' => env('DB_PASSWORD', ''),
+            'unix_socket' => env('DB_SOCKET', ''),
+            'charset' => env('DB_CHARSET', 'utf8mb4'),
+            'collation' => env('DB_COLLATION', 'utf8mb4_unicode_ci'),
+            'prefix' => '',
+            'prefix_indexes' => true,
+            'strict' => true,
+            'engine' => null,
+            'options' => extension_loaded('pdo_mysql') ? array_filter([
+                (PHP_VERSION_ID >= 80500 ? Mysql::ATTR_SSL_CA : PDO::MYSQL_ATTR_SSL_CA) => env('MYSQL_ATTR_SSL_CA'),
+            ]) : [],
+        ],
+
+        'mariadb' => [
+            'driver' => 'mariadb',
+            'url' => env('DB_URL'),
+            'host' => env('DB_HOST', '127.0.0.1'),
+            'port' => env('DB_PORT', '3306'),
+            'database' => env('DB_DATABASE', 'laravel'),
+            'username' => env('DB_USERNAME', 'root'),
+            'password' => env('DB_PASSWORD', ''),
+            'unix_socket' => env('DB_SOCKET', ''),
+            'charset' => env('DB_CHARSET', 'utf8mb4'),
+            'collation' => env('DB_COLLATION', 'utf8mb4_unicode_ci'),
+            'prefix' => '',
+            'prefix_indexes' => true,
+            'strict' => true,
+            'engine' => null,
+            'options' => extension_loaded('pdo_mysql') ? array_filter([
+                (PHP_VERSION_ID >= 80500 ? Mysql::ATTR_SSL_CA : PDO::MYSQL_ATTR_SSL_CA) => env('MYSQL_ATTR_SSL_CA'),
+            ]) : [],
+        ],
+
+        'pgsql' => [
+            'driver' => 'pgsql',
+            'url' => env('DB_URL'),
+            'host' => env('DB_HOST', '127.0.0.1'),
+            'port' => env('DB_PORT', '5432'),
+            'database' => env('DB_DATABASE', 'laravel'),
+            'username' => env('DB_USERNAME', 'root'),
+            'password' => env('DB_PASSWORD', ''),
+            'charset' => env('DB_CHARSET', 'utf8'),
+            'prefix' => '',
+            'prefix_indexes' => true,
+            'search_path' => 'public',
+            'sslmode' => env('DB_SSLMODE', 'prefer'),
+        ],
+
+        'sqlsrv' => [
+            'driver' => 'sqlsrv',
+            'url' => env('DB_URL'),
+            'host' => env('DB_HOST', 'localhost'),
+            'port' => env('DB_PORT', '1433'),
+            'database' => env('DB_DATABASE', 'laravel'),
+            'username' => env('DB_USERNAME', 'root'),
+            'password' => env('DB_PASSWORD', ''),
+            'charset' => env('DB_CHARSET', 'utf8'),
+            'prefix' => '',
+            'prefix_indexes' => true,
+            // 'encrypt' => env('DB_ENCRYPT', 'yes'),
+            // 'trust_server_certificate' => env('DB_TRUST_SERVER_CERTIFICATE', 'false'),
+        ],
+
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Migration Repository Table
+    |--------------------------------------------------------------------------
+    |
+    | This table keeps track of all the migrations that have already run for
+    | your application. Using this information, we can determine which of
+    | the migrations on disk haven't actually been run on the database.
+    |
+    */
+
+    'migrations' => [
+        'table' => 'migrations',
+        'update_date_on_publish' => true,
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Redis Databases
+    |--------------------------------------------------------------------------
+    |
+    | Redis is an open source, fast, and advanced key-value store that also
+    | provides a richer body of commands than a typical key-value system
+    | such as Memcached. You may define your connection settings here.
+    |
+    */
+
+    'redis' => [
+
+        'client' => env('REDIS_CLIENT', 'phpredis'),
+
+        'options' => [
+            'cluster' => env('REDIS_CLUSTER', 'redis'),
+            'prefix' => env('REDIS_PREFIX', Str::slug((string) env('APP_NAME', 'laravel')).'-database-'),
+            'persistent' => env('REDIS_PERSISTENT', false),
+        ],
+
+        'default' => [
+            'url' => env('REDIS_URL'),
+            'host' => env('REDIS_HOST', '127.0.0.1'),
+            'username' => env('REDIS_USERNAME'),
+            'password' => env('REDIS_PASSWORD'),
+            'port' => env('REDIS_PORT', '6379'),
+            'database' => env('REDIS_DB', '0'),
+            'max_retries' => env('REDIS_MAX_RETRIES', 3),
+            'backoff_algorithm' => env('REDIS_BACKOFF_ALGORITHM', 'decorrelated_jitter'),
+            'backoff_base' => env('REDIS_BACKOFF_BASE', 100),
+            'backoff_cap' => env('REDIS_BACKOFF_CAP', 1000),
+        ],
+
+        'cache' => [
+            'url' => env('REDIS_URL'),
+            'host' => env('REDIS_HOST', '127.0.0.1'),
+            'username' => env('REDIS_USERNAME'),
+            'password' => env('REDIS_PASSWORD'),
+            'port' => env('REDIS_PORT', '6379'),
+            'database' => env('REDIS_CACHE_DB', '1'),
+            'max_retries' => env('REDIS_MAX_RETRIES', 3),
+            'backoff_algorithm' => env('REDIS_BACKOFF_ALGORITHM', 'decorrelated_jitter'),
+            'backoff_base' => env('REDIS_BACKOFF_BASE', 100),
+            'backoff_cap' => env('REDIS_BACKOFF_CAP', 1000),
+        ],
+
+    ],
+
+];
+===== tests\Feature\PaymentWaterfallTest.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use App\Enums\LoanStatus;
+use App\Enums\RiskBand;
+use App\Exceptions\Fintech\InvalidPaymentAmountException;
+use App\Models\Borrower;
+use App\Models\Loan;
+use App\Models\LoanApplication;
+use App\Models\LoanLedgerEntry;
+use App\Models\LoanProduct;
+use App\Models\OutboxEvent;
+use App\Services\Financial\PaymentWaterfallService;
+use Carbon\CarbonImmutable;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use Tests\TestCase;
+
+uses(TestCase::class, RefreshDatabase::class);
+
+beforeEach(function (): void {
+    $this->borrower = Borrower::create([
+        'full_name'      => 'Wanjiku Kamau',
+        'id_number'      => '28471928',
+        'phone_number'   => '254712345678',
+        'credit_limit'   => '50000.00',
+        'risk_band'      => RiskBand::B,
+        'is_blacklisted' => false,
+    ]);
+
+    $this->product = LoanProduct::create([
+        'name'                        => 'Biashara Micro Capital',
+        'product_code'                => 'BMC-30',
+        'min_principal'               => '1000.00',
+        'max_principal'               => '50000.00',
+        'default_tenure_days'         => 30,
+        'interest_calculation_method' => 'reducing_balance',
+        'is_active'                   => true,
+    ]);
+
+    $this->application = LoanApplication::create([
+        'application_number'   => 'APP-WATERFALL-01',
+        'borrower_id'          => $this->borrower->id,
+        'loan_product_id'      => $this->product->id,
+        'requested_principal'  => '10000.00',
+        'requested_tenure_days'=> 30,
+        'status'               => 'approved',
+    ]);
+
+    $this->loan = Loan::create([
+        'loan_number'         => 'LN-WATERFALL-01',
+        'loan_application_id' => $this->application->id,
+        'borrower_id'         => $this->borrower->id,
+        'loan_product_id'     => $this->product->id,
+        'principal_disbursed' => '10000.00',
+        'annual_interest_rate'=> '18.00',
+        'tenure_days'         => 30,
+        'status'              => LoanStatus::DISBURSED,
+        'disbursed_at'        => CarbonImmutable::now()->subDays(15),
+        'due_date'            => CarbonImmutable::now()->addDays(15),
+        'is_in_duplum_locked' => false,
+    ]);
+
+    // Initial Ledger state: KES 10,000 principal, KES 1,500 interest accrued, KES 500 penalty fees
+    // Total debt = KES 12,000.00
+    LoanLedgerEntry::create([
+        'loan_id'                   => $this->loan->id,
+        'entry_type'                => 'accrual_baseline',
+        'debit'                     => '12000.00',
+        'credit'                    => '0.00',
+        'running_principal_balance' => '10000.00',
+        'running_interest_balance'  => '1500.00',
+        'running_fees_balance'      => '500.00',
+        'total_running_balance'     => '12000.00',
+        'reference'                 => 'INIT-DEBT',
+        'notes'                     => 'Initial debt baseline setup for waterfall test',
+    ]);
+
+    $this->service = app(PaymentWaterfallService::class);
+});
+
+it('allocates partial repayment to fees first then interest, leaving principal intact', function (): void {
+    // Borrower pays KES 1,000.00
+    // Should clear KES 500 fees entirely, remaining KES 500 to interest, KES 0 to principal
+    $result = $this->service->executeWaterfall($this->loan, '1000.00', 'MPESA-TXN-01');
+
+    expect($result['allocated_fees'])->toBe('500.00')
+        ->and($result['allocated_interest'])->toBe('500.00')
+        ->and($result['allocated_principal'])->toBe('0.00')
+        ->and($result['overpayment_credit'])->toBe('0.00')
+        ->and($result['new_total_balance'])->toBe('11000.00')
+        ->and($result['is_settled'])->toBeFalse();
+
+    // Verify ledger entry
+    $latest = LoanLedgerEntry::where('loan_id', $this->loan->id)->latest('id')->first();
+    expect($latest->running_fees_balance)->toBe('0.00')
+        ->and($latest->running_interest_balance)->toBe('1000.00')
+        ->and($latest->running_principal_balance)->toBe('10000.00');
+});
+
+it('cascades sequential payments through interest down into principal', function (): void {
+    // First payment: KES 1,000 (clears 500 fee, 500 interest)
+    $this->service->executeWaterfall($this->loan, '1000.00', 'MPESA-TXN-01');
+
+    // Second payment: KES 3,000
+    // Fees are 0. Remaining interest is KES 1,000 (cleared). Remaining KES 2,000 goes to principal!
+    $result = $this->service->executeWaterfall($this->loan, '3000.00', 'MPESA-TXN-02');
+
+    expect($result['allocated_fees'])->toBe('0.00')
+        ->and($result['allocated_interest'])->toBe('1000.00')
+        ->and($result['allocated_principal'])->toBe('2000.00')
+        ->and($result['new_total_balance'])->toBe('8000.00')
+        ->and($result['is_settled'])->toBeFalse();
+
+    $latest = LoanLedgerEntry::where('loan_id', $this->loan->id)->latest('id')->first();
+    expect($latest->running_fees_balance)->toBe('0.00')
+        ->and($latest->running_interest_balance)->toBe('0.00')
+        ->and($latest->running_principal_balance)->toBe('8000.00');
+});
+
+it('fully settles loan and emits an outbox event when entire debt is cleared', function (): void {
+    // Pay exact total balance of KES 12,000.00
+    $result = $this->service->executeWaterfall($this->loan, '12000.00', 'MPESA-FULL-SETTLE');
+
+    expect($result['allocated_fees'])->toBe('500.00')
+        ->and($result['allocated_interest'])->toBe('1500.00')
+        ->and($result['allocated_principal'])->toBe('10000.00')
+        ->and($result['new_total_balance'])->toBe('0.00')
+        ->and($result['is_settled'])->toBeTrue();
+
+    $this->loan->refresh();
+    expect($this->loan->status)->toBe(LoanStatus::SETTLED);
+
+    // Verify outbox settlement event
+    $outbox = OutboxEvent::where('aggregate_id', $this->loan->id)
+        ->where('event_name', 'loan.settled')
+        ->first();
+
+    expect($outbox)->not->toBeNull()
+        ->and($outbox->payload['status'])->toBe('SETTLED');
+});
+
+it('accurately captures overpayment credits when payment exceeds total debt', function (): void {
+    // Debt is KES 12,000.00. Borrower pays KES 14,500.00
+    $result = $this->service->executeWaterfall($this->loan, '14500.00', 'MPESA-OVERPAY-01');
+
+    expect($result['allocated_fees'])->toBe('500.00')
+        ->and($result['allocated_interest'])->toBe('1500.00')
+        ->and($result['allocated_principal'])->toBe('10000.00')
+        ->and($result['overpayment_credit'])->toBe('2500.00')
+        ->and($result['new_total_balance'])->toBe('0.00')
+        ->and($result['is_settled'])->toBeTrue();
+
+    // Verify waterfall log records overpayment
+    $log = DB::table('payment_waterfall_logs')
+        ->where('payment_reference', 'MPESA-OVERPAY-01')
+        ->first();
+
+    // Format float from SQLite/MySQL to exact 2-decimal string
+    expect(number_format((float) $log->overpayment_amount, 2, '.', ''))->toBe('2500.00');
+});
+
+it('throws InvalidPaymentAmountException on zero or negative amounts', function (): void {
+    $this->service->executeWaterfall($this->loan, '0.00', 'BAD-PAYMENT');
+})->throws(InvalidPaymentAmountException::class);===== tests\Feature\MpesaWebhookTest.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use App\Enums\LoanStatus;
+use App\Enums\RiskBand;
+use App\Jobs\ProcessMpesaCallbackJob;
+use App\Models\Borrower;
+use App\Models\ChartOfAccount;
+use App\Models\Loan;
+use App\Models\LoanApplication;
+use App\Models\LoanLedgerEntry;
+use App\Models\LoanProduct;
+use App\Models\MpesaC2bCallback;
+use App\Models\MpesaStkRequest;
+use App\Services\Financial\Mpesa\MpesaWebhookService;
+use Carbon\CarbonImmutable;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Queue;
+use Tests\TestCase;
+
+uses(TestCase::class, RefreshDatabase::class);
+
+beforeEach(function (): void {
+    Queue::fake();
+
+    // Seed General Ledger Chart of Accounts
+    ChartOfAccount::create(['account_code' => '1010', 'account_name' => 'M-Pesa Settlement Account', 'account_type' => 'ASSET', 'currency' => 'KES', 'is_active' => true]);
+    ChartOfAccount::create(['account_code' => '1200', 'account_name' => 'Loans Receivable', 'account_type' => 'ASSET', 'currency' => 'KES', 'is_active' => true]);
+    ChartOfAccount::create(['account_code' => '2010', 'account_name' => 'Customer Overpayment Credits', 'account_type' => 'LIABILITY', 'currency' => 'KES', 'is_active' => true]);
+    ChartOfAccount::create(['account_code' => '4010', 'account_name' => 'Interest Income', 'account_type' => 'REVENUE', 'currency' => 'KES', 'is_active' => true]);
+    ChartOfAccount::create(['account_code' => '4020', 'account_name' => 'Fee Income', 'account_type' => 'REVENUE', 'currency' => 'KES', 'is_active' => true]);
+
+    $this->borrower = Borrower::create([
+        'full_name'      => 'Wanjiku Kamau',
+        'id_number'      => '28471928',
+        'phone_number'   => '254712345678',
+        'credit_limit'   => '50000.00',
+        'risk_band'      => RiskBand::B,
+        'is_blacklisted' => false,
+    ]);
+
+    $this->product = LoanProduct::create([
+        'name'                        => 'Biashara Micro Capital',
+        'product_code'                => 'BMC-30',
+        'min_principal'               => '1000.00',
+        'max_principal'               => '50000.00',
+        'default_tenure_days'         => 30,
+        'interest_calculation_method' => 'reducing_balance',
+        'is_active'                   => true,
+    ]);
+
+    $this->application = LoanApplication::create([
+        'application_number'   => 'APP-WEBHOOK-01',
+        'borrower_id'          => $this->borrower->id,
+        'loan_product_id'      => $this->product->id,
+        'requested_principal'  => '10000.00',
+        'requested_tenure_days'=> 30,
+        'status'               => 'approved',
+    ]);
+
+    $this->loan = Loan::create([
+        'loan_number'         => 'LN-PAYBILL-01',
+        'loan_application_id' => $this->application->id,
+        'borrower_id'         => $this->borrower->id,
+        'loan_product_id'     => $this->product->id,
+        'principal_disbursed' => '10000.00',
+        'annual_interest_rate'=> '15.00',
+        'tenure_days'         => 30,
+        'status'              => LoanStatus::DISBURSED,
+        'disbursed_at'        => CarbonImmutable::now()->subDays(10),
+        'due_date'            => CarbonImmutable::now()->addDays(20),
+        'is_in_duplum_locked' => false,
+    ]);
+
+    // Initial baseline ledger entry: KES 10,000 principal
+    LoanLedgerEntry::create([
+        'loan_id'                   => $this->loan->id,
+        'entry_type'                => 'disbursement',
+        'debit'                     => '10000.00',
+        'credit'                    => '0.00',
+        'running_principal_balance' => '10000.00',
+        'running_interest_balance'  => '0.00',
+        'running_fees_balance'      => '0.00',
+        'total_running_balance'     => '10000.00',
+        'reference'                 => 'DISB-TEST',
+    ]);
+});
+
+it('ingests c2b confirmation webhook, logs callback, and dispatches background job', function (): void {
+    $payload = [
+        'TransactionType'   => 'Pay Utility',
+        'TransID'           => 'QHD91823J1',
+        'TransTime'         => '20261016140000',
+        'TransAmount'       => '3000.00',
+        'BusinessShortCode' => '174379',
+        'BillRefNumber'     => 'LN-PAYBILL-01',
+        'MSISDN'            => '254712345678',
+        'FirstName'         => 'Wanjiku',
+    ];
+
+    $response = $this->postJson('/api/v1/mpesa/c2b-confirmation', $payload);
+
+    $response->assertStatus(200)
+        ->assertJson([
+            'ResultCode' => 0,
+            'ResultDesc' => 'Confirmation received successfully',
+        ]);
+
+    expect(MpesaC2bCallback::where('trans_id', 'QHD91823J1')->exists())->toBeTrue();
+
+    Queue::assertPushed(ProcessMpesaCallbackJob::class, function ($job) {
+        return $job->sourceType === 'C2B';
+    });
+});
+
+it('gracefully handles duplicate c2b webhook without creating duplicate entries', function (): void {
+    MpesaC2bCallback::create([
+        'transaction_type'    => 'Pay Utility',
+        'trans_id'            => 'DUPLICATE_TXN_01',
+        'trans_time'          => '20261016140000',
+        'trans_amount'        => '5000.00',
+        'business_short_code' => '174379',
+        'bill_ref_number'     => 'LN-PAYBILL-01',
+        'msisdn'              => '254712345678',
+        'is_reconciled'       => false,
+    ]);
+
+    $payload = [
+        'TransID'       => 'DUPLICATE_TXN_01', // Identical receipt ID!
+        'TransAmount'   => '5000.00',
+        'BillRefNumber' => 'LN-PAYBILL-01',
+        'MSISDN'        => '254712345678',
+    ];
+
+    $response = $this->postJson('/api/v1/mpesa/c2b-confirmation', $payload);
+
+    // Must return 200 OK so Safaricom stops retrying
+    $response->assertStatus(200)
+        ->assertJson(['ResultCode' => 0, 'ResultDesc' => 'Duplicate acknowledged']);
+
+    // Assert only 1 record exists in database
+    expect(MpesaC2bCallback::where('trans_id', 'DUPLICATE_TXN_01')->count())->toBe(1);
+});
+
+it('ingests stk push callback successfully and marks request as successful', function (): void {
+    $stk = MpesaStkRequest::create([
+        'loan_id'              => $this->loan->id,
+        'merchant_request_id'  => 'MERCH-123',
+        'checkout_request_id'  => 'ws_CO_16102026_TEST1',
+        'phone_number'         => '254712345678',
+        'amount'               => '4000.00',
+        'status'               => 'pending',
+    ]);
+
+    $payload = [
+        'Body' => [
+            'stkCallback' => [
+                'MerchantRequestID' => 'MERCH-123',
+                'CheckoutRequestID' => 'ws_CO_16102026_TEST1',
+                'ResultCode'        => 0,
+                'ResultDesc'        => 'The service request is processed successfully.',
+                'CallbackMetadata'  => [
+                    'Item' => [
+                        ['Name' => 'Amount', 'Value' => 4000.00],
+                        ['Name' => 'MpesaReceiptNumber', 'Value' => 'QHD445566A'],
+                        ['Name' => 'PhoneNumber', 'Value' => 254712345678],
+                    ],
+                ],
+            ],
+        ],
+    ];
+
+    $response = $this->postJson('/api/v1/mpesa/stk-callback', $payload);
+
+    $response->assertStatus(200);
+
+    $stk->refresh();
+    expect($stk->status)->toBe('successful')
+        ->and($stk->mpesa_receipt_number)->toBe('QHD445566A');
+
+    Queue::assertPushed(ProcessMpesaCallbackJob::class, function ($job) use ($stk) {
+        return $job->sourceType === 'STK' && $job->recordId === $stk->id;
+    });
+});
+
+it('executes background repayment job through payment waterfall and gl', function (): void {
+    $callback = MpesaC2bCallback::create([
+        'transaction_type'    => 'Pay Utility',
+        'trans_id'            => 'PAYBILL-WATERFALL-01',
+        'trans_time'          => '20261016140000',
+        'trans_amount'        => '2000.00',
+        'business_short_code' => '174379',
+        'bill_ref_number'     => 'LN-PAYBILL-01',
+        'msisdn'              => '254712345678',
+        'is_reconciled'       => false,
+    ]);
+
+    // Instantiate and execute service synchronously for test assertion
+    $service = app(MpesaWebhookService::class);
+    $service->processRepayment('C2B', $callback->id);
+
+    $callback->refresh();
+    expect($callback->is_reconciled)->toBeTrue();
+
+    // Assert Loan Ledger updated via Waterfall: Principal reduced from 10,000 to 8,000
+    $latestLedger = LoanLedgerEntry::where('loan_id', $this->loan->id)->latest('id')->first();
+    expect(number_format((float) $latestLedger->running_principal_balance, 2, '.', ''))->toBe('8000.00')
+        ->and(number_format((float) $latestLedger->credit, 2, '.', ''))->toBe('2000.00');
+});===== tests\Feature\MakerCheckerServiceTest.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace Tests\Feature;
+
+use App\Models\Borrower;
+use App\Models\LoanApplication;
+use App\Models\LoanProduct;
+use App\Models\MakerCheckerRequest;
+use App\Models\User;
+use App\Services\Governance\MakerCheckerService;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use RuntimeException;
+use Tests\TestCase;
+
+uses(TestCase::class, RefreshDatabase::class);
+
+test('creates pending request and authorizes successfully when maker and checker are different users', function () {
+    /** @var User $maker */
+    $maker = User::create([
+        'name' => 'John Maker',
+        'email' => 'maker@lender.co.ke',
+        'password' => bcrypt('password'),
+        'phone_number' => '254711000111',
+        'is_active' => true,
+    ]);
+
+    /** @var User $checker */
+    $checker = User::create([
+        'name' => 'Sarah Checker',
+        'email' => 'checker@lender.co.ke',
+        'password' => bcrypt('password'),
+        'phone_number' => '254711000222',
+        'is_active' => true,
+    ]);
+
+    /** @var Borrower $borrower */
+    $borrower = Borrower::create([
+        'full_name' => 'David Ochieng',
+        'id_number' => '21908374',
+        'phone_number' => '254722334455',
+        'credit_limit' => '50000.00',
+        'risk_band' => \App\Enums\RiskBand::A,
+        'is_blacklisted' => false,
+    ]);
+
+    /** @var LoanProduct $product */
+    $product = LoanProduct::create([
+        'name' => 'Emergency Advance',
+        'product_code' => 'EMG_ADV',
+        'min_principal' => '1000.00',
+        'max_principal' => '20000.00',
+        'default_tenure_days' => 14,
+        'interest_calculation_method' => 'FLAT_RATE',
+        'is_active' => true,
+    ]);
+
+    /** @var LoanApplication $application */
+    $application = LoanApplication::create([
+        'application_number' => 'APP_MK_001',
+        'borrower_id' => $borrower->id,
+        'loan_product_id' => $product->id,
+        'requested_principal' => '10000.00',
+        'requested_tenure_days' => 14,
+        'status' => 'approved_pending_checker',
+    ]);
+
+    /** @var MakerCheckerService $service */
+    $service = $this->app->make(MakerCheckerService::class);
+
+    $pending = $service->createPendingRequest(
+        $maker->id,
+        'APPROVE_LOAN_APPLICATION',
+        LoanApplication::class,
+        $application->id,
+        ['requested_principal' => '10000.00']
+    );
+
+    expect($pending->status)->toBe('pending');
+
+    $result = $service->authorizeRequest($pending->id, $checker->id, 'Verified income source and CRB records.');
+
+    expect($result['status'])->toBe('approved');
+
+    $this->assertDatabaseHas('maker_checker_requests', [
+        'id' => $pending->id,
+        'status' => 'approved',
+        'checker_user_id' => $checker->id,
+    ]);
+
+    $this->assertDatabaseHas('loan_applications', [
+        'id' => $application->id,
+        'status' => 'approved',
+    ]);
+
+    $this->assertDatabaseHas('audit_trails', [
+        'user_id' => $checker->id,
+        'action' => 'MAKER_CHECKER_AUTHORIZED',
+    ]);
+});
+
+test('throws RuntimeException when maker attempts to self approve request', function () {
+    /** @var User $maker */
+    $maker = User::create([
+        'name' => 'Alex Operator',
+        'email' => 'alex@lender.co.ke',
+        'password' => bcrypt('password'),
+        'phone_number' => '254711333444',
+        'is_active' => true,
+    ]);
+
+    /** @var MakerCheckerService $service */
+    $service = $this->app->make(MakerCheckerService::class);
+
+    $pending = $service->createPendingRequest(
+        $maker->id,
+        'APPROVE_LOAN_APPLICATION',
+        LoanApplication::class,
+        101,
+        []
+    );
+
+    // Attempting self-approval must throw RuntimeException
+    $service->authorizeRequest($pending->id, $maker->id, 'Self approval attempt');
+})->throws(RuntimeException::class);===== app\Services\Financial\PaymentWaterfallService.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Financial;
+
+use App\Enums\LoanStatus;
+use App\Exceptions\Fintech\InvalidPaymentAmountException;
+use App\Models\AuditTrail;
+use App\Models\Loan;
+use App\Models\LoanLedgerEntry;
+use App\Models\OutboxEvent;
+use Carbon\CarbonImmutable;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+
+final class PaymentWaterfallService
+{
+    /**
+     * Executes the statutory payment waterfall under a pessimistic row lock.
+     * Order of allocation: Fees & Penalties -> Accrued Interest -> Principal.
+     *
+     * @return array{
+     *     allocated_fees: string,
+     *     allocated_interest: string,
+     *     allocated_principal: string,
+     *     overpayment_credit: string,
+     *     new_total_balance: string,
+     *     is_settled: bool
+     * }
+     */
+    public function executeWaterfall(
+        Loan $loan,
+        string $amount,
+        string $reference,
+        string $source = 'MPESA_C2B'
+    ): array {
+        // Step 1: Validate numeric positive amount
+        if (!is_numeric($amount) || bccomp($amount, '0.00', 2) <= 0) {
+            throw new InvalidPaymentAmountException($amount);
+        }
+
+        return DB::transaction(function () use ($loan, $amount, $reference, $source): array {
+            // Step 2: Pessimistic Row Lock on Loan
+            $lockedLoan = Loan::query()->where('id', $loan->id)->lockForUpdate()->firstOrFail();
+
+            // Step 3: Retrieve current running balances from the latest immutable ledger line
+            $latestEntry = LoanLedgerEntry::query()
+                ->where('loan_id', $lockedLoan->id)
+                ->latest('id')
+                ->lockForUpdate()
+                ->first();
+
+            $currentFees = $latestEntry !== null ? (string) $latestEntry->running_fees_balance : '0.00';
+            $currentInterest = $latestEntry !== null ? (string) $latestEntry->running_interest_balance : '0.00';
+            $currentPrincipal = $latestEntry !== null ? (string) $latestEntry->running_principal_balance : (string) $lockedLoan->principal_disbursed;
+
+            $unallocated = $amount;
+
+            // Step 4: Allocate to Fees & Penalties first
+            $allocatedFees = '0.00';
+            if (bccomp($currentFees, '0.00', 2) > 0) {
+                $allocatedFees = bccomp($unallocated, $currentFees, 2) >= 0 ? $currentFees : $unallocated;
+                $unallocated = bcsub($unallocated, $allocatedFees, 2);
+            }
+
+            // Step 5: Allocate to Accrued Interest second
+            $allocatedInterest = '0.00';
+            if (bccomp($unallocated, '0.00', 2) > 0 && bccomp($currentInterest, '0.00', 2) > 0) {
+                $allocatedInterest = bccomp($unallocated, $currentInterest, 2) >= 0 ? $currentInterest : $unallocated;
+                $unallocated = bcsub($unallocated, $allocatedInterest, 2);
+            }
+
+            // Step 6: Allocate to Outstanding Principal third
+            $allocatedPrincipal = '0.00';
+            if (bccomp($unallocated, '0.00', 2) > 0 && bccomp($currentPrincipal, '0.00', 2) > 0) {
+                $allocatedPrincipal = bccomp($unallocated, $currentPrincipal, 2) >= 0 ? $currentPrincipal : $unallocated;
+                $unallocated = bcsub($unallocated, $allocatedPrincipal, 2);
+            }
+
+            // Step 7: Any remaining unallocated cash becomes Overpayment Credit
+            $overpaymentCredit = $unallocated;
+
+            // Step 8: Compute new running balances
+            $newFees = bcsub($currentFees, $allocatedFees, 2);
+            $newInterest = bcsub($currentInterest, $allocatedInterest, 2);
+            $newPrincipal = bcsub($currentPrincipal, $allocatedPrincipal, 2);
+            $newTotalBalance = bcadd(bcadd($newPrincipal, $newInterest, 2), $newFees, 2);
+
+            // Total credit applied against the loan
+            $totalCreditApplied = bcadd(bcadd($allocatedFees, $allocatedInterest, 2), $allocatedPrincipal, 2);
+
+            // Step 9: Write immutable append-only ledger entry
+            LoanLedgerEntry::create([
+                'loan_id'                   => $lockedLoan->id,
+                'entry_type'                => 'repayment',
+                'debit'                     => '0.00',
+                'credit'                    => $totalCreditApplied,
+                'running_principal_balance' => $newPrincipal,
+                'running_interest_balance'  => $newInterest,
+                'running_fees_balance'      => $newFees,
+                'total_running_balance'     => $newTotalBalance,
+                'reference'                 => $reference,
+                'notes'                     => sprintf(
+                    'Repayment via %s [Ref: %s]. Waterfall split: Fees: KES %s | Interest: KES %s | Principal: KES %s | Overpayment: KES %s',
+                    $source,
+                    $reference,
+                    $allocatedFees,
+                    $allocatedInterest,
+                    $allocatedPrincipal,
+                    $overpaymentCredit
+                ),
+            ]);
+
+            // Step 10: Log waterfall breakdown
+            DB::table('payment_waterfall_logs')->insert([
+                'loan_id'                 => $lockedLoan->id,
+                'payment_reference'       => $reference,
+                'total_amount_received'   => $amount,
+                'allocated_to_fees'       => $allocatedFees,
+                'allocated_to_interest'   => $allocatedInterest,
+                'allocated_to_principal'  => $allocatedPrincipal,
+                'overpayment_amount'      => $overpaymentCredit,
+                'created_at'              => CarbonImmutable::now(),
+            ]);
+
+            // Step 11: Check for full loan settlement
+            $isSettled = bccomp($newTotalBalance, '0.00', 2) === 0;
+            if ($isSettled) {
+                $lockedLoan->update([
+                    'status' => LoanStatus::SETTLED,
+                ]);
+
+                // Cryptographically chained Outbox Event for settlement
+                $prevEvent = OutboxEvent::query()->latest('id')->first();
+                $prevHash = $prevEvent ? $prevEvent->current_event_hash : str_repeat('0', 64);
+
+                $payload = [
+                    'loan_id'          => $lockedLoan->id,
+                    'loan_number'      => $lockedLoan->loan_number,
+                    'borrower_id'      => $lockedLoan->borrower_id,
+                    'status'           => 'SETTLED',
+                    'final_payment_ref'=> $reference,
+                    'settled_at'       => CarbonImmutable::now()->toIso8601String(),
+                ];
+
+                $currentHash = hash('sha256', $prevHash . 'loan.settled' . json_encode($payload));
+
+                OutboxEvent::create([
+                    'aggregate_type'      => Loan::class,
+                    'aggregate_id'        => $lockedLoan->id,
+                    'event_name'          => 'loan.settled',
+                    'payload'             => $payload,
+                    'previous_event_hash' => $prevHash,
+                    'current_event_hash'  => $currentHash,
+                    'is_published'        => false,
+                    'retry_count'         => 0,
+                ]);
+            }
+
+            // Step 12: Record operational audit trail
+            AuditTrail::create([
+                'user_id'        => auth()->id(),
+                'action'         => 'PAYMENT_WATERFALL_EXECUTED',
+                'auditable_type' => Loan::class,
+                'auditable_id'   => $lockedLoan->id,
+                'old_values'     => [
+                    'principal' => $currentPrincipal,
+                    'interest'  => $currentInterest,
+                    'fees'      => $currentFees,
+                ],
+                'new_values'     => [
+                    'principal'   => $newPrincipal,
+                    'interest'    => $newInterest,
+                    'fees'        => $newFees,
+                    'overpayment' => $overpaymentCredit,
+                    'is_settled'  => $isSettled,
+                ],
+                'ip_address'     => request()->ip() ?? '127.0.0.1',
+                'user_agent'     => request()->userAgent() ?? 'System/CLI',
+            ]);
+
+            Log::channel('daily')->info(sprintf(
+                'Waterfall executed on Loan #%d: Received KES %s -> Fees: %s, Int: %s, Prin: %s, Overpay: %s [Ref: %s]',
+                $lockedLoan->id,
+                $amount,
+                $allocatedFees,
+                $allocatedInterest,
+                $allocatedPrincipal,
+                $overpaymentCredit,
+                $reference
+            ));
+
+            return [
+                'allocated_fees'      => $allocatedFees,
+                'allocated_interest'  => $allocatedInterest,
+                'allocated_principal' => $allocatedPrincipal,
+                'overpayment_credit'  => $overpaymentCredit,
+                'new_total_balance'   => $newTotalBalance,
+                'is_settled'          => $isSettled,
+            ];
+        });
+    }
+}===== app\Services\Financial\Mpesa\MpesaWebhookService.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Financial\Mpesa;
+
+use App\Exceptions\Fintech\DuplicateWebhookException;
+use App\Jobs\ProcessMpesaCallbackJob;
+use App\Models\Loan;
+use App\Models\MpesaC2bCallback;
+use App\Models\MpesaStkRequest;
+use App\Services\Financial\GeneralLedgerService;
+use App\Services\Financial\PaymentWaterfallService;
+use Carbon\CarbonImmutable;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+
+final class MpesaWebhookService
+{
+    public function __construct(
+        private readonly PaymentWaterfallService $waterfallService,
+        private readonly GeneralLedgerService $glService
+    ) {}
+
+    /**
+     * Ingests incoming C2B Paybill Confirmation webhook from Safaricom.
+     *
+     * @param array<string, mixed> $payload
+     */
+    public function ingestC2bConfirmation(array $payload): MpesaC2bCallback
+    {
+        $transId = (string) ($payload['TransID'] ?? '');
+        $amount = (string) ($payload['TransAmount'] ?? '0.00');
+        $billRef = trim((string) ($payload['BillRefNumber'] ?? ''));
+        $msisdn = (string) ($payload['MSISDN'] ?? '');
+
+        if ($transId === '') {
+            throw new \InvalidArgumentException('TransID missing from Safaricom C2B payload.');
+        }
+
+        // Idempotency Check: Prevent duplicate webhook processing
+        $existing = MpesaC2bCallback::query()->where('trans_id', $transId)->first();
+        if ($existing !== null) {
+            throw new DuplicateWebhookException($transId, 'SAFARICOM_C2B');
+        }
+
+        $callback = MpesaC2bCallback::create([
+            'transaction_type'    => (string) ($payload['TransactionType'] ?? 'Pay Utility'),
+            'trans_id'            => $transId,
+            'trans_time'          => (string) ($payload['TransTime'] ?? CarbonImmutable::now()->format('YmdHis')),
+            'trans_amount'        => $amount,
+            'business_short_code' => (string) ($payload['BusinessShortCode'] ?? config('mpesa.shortcode')),
+            'bill_ref_number'     => $billRef,
+            'msisdn'              => $msisdn,
+            'first_name'          => (string) ($payload['FirstName'] ?? null),
+            'is_reconciled'       => false,
+        ]);
+
+        // Dispatch background job for high-concurrency ledger crediting
+        ProcessMpesaCallbackJob::dispatch('C2B', $callback->id);
+
+        return $callback;
+    }
+
+    /**
+     * Ingests incoming Lipa na M-Pesa STK Push Callback from Safaricom.
+     *
+     * @param array<string, mixed> $payload
+     */
+    public function ingestStkCallback(array $payload): MpesaStkRequest
+    {
+        $stkCallback = $payload['Body']['stkCallback'] ?? [];
+        $checkoutRequestId = (string) ($stkCallback['CheckoutRequestID'] ?? '');
+        $resultCode = (int) ($stkCallback['ResultCode'] ?? -1);
+        $resultDesc = (string) ($stkCallback['ResultDesc'] ?? 'No description');
+
+        $stkRequest = MpesaStkRequest::query()
+            ->where('checkout_request_id', $checkoutRequestId)
+            ->firstOrFail();
+
+        // Check if already processed
+        if ($stkRequest->status === 'successful') {
+            throw new DuplicateWebhookException($checkoutRequestId, 'SAFARICOM_STK');
+        }
+
+        $metadataItems = $stkCallback['CallbackMetadata']['Item'] ?? [];
+        $receiptNumber = null;
+        $amount = (string) $stkRequest->amount;
+
+        foreach ($metadataItems as $item) {
+            if (($item['Name'] ?? '') === 'MpesaReceiptNumber') {
+                $receiptNumber = (string) $item['Value'];
+            }
+            if (($item['Name'] ?? '') === 'Amount') {
+                $amount = number_format((float) $item['Value'], 2, '.', '');
+            }
+        }
+
+        if ($resultCode === 0 && $receiptNumber !== null) {
+            $stkRequest->update([
+                'status'               => 'successful',
+                'mpesa_receipt_number' => $receiptNumber,
+                'result_code'          => $resultCode,
+                'result_desc'          => $resultDesc,
+                'amount'               => $amount,
+            ]);
+
+            // Dispatch background job for waterfall execution
+            ProcessMpesaCallbackJob::dispatch('STK', $stkRequest->id);
+        } else {
+            $stkRequest->update([
+                'status'      => 'failed',
+                'result_code' => $resultCode,
+                'result_desc' => $resultDesc,
+            ]);
+        }
+
+        return $stkRequest;
+    }
+
+    /**
+     * Asynchronously executes payment waterfall and double-entry postings for an ingested callback.
+     */
+    public function processRepayment(string $sourceType, int $recordId): void
+    {
+        DB::transaction(function () use ($sourceType, $recordId): void {
+            if ($sourceType === 'C2B') {
+                $callback = MpesaC2bCallback::query()->where('id', $recordId)->lockForUpdate()->firstOrFail();
+                if ($callback->is_reconciled) {
+                    return; // Already reconciled
+                }
+
+                $loan = $this->resolveLoanFromReference($callback->bill_ref_number, $callback->msisdn);
+                if ($loan === null) {
+                    Log::channel('daily')->warning(sprintf(
+                        'Unmatched C2B Payment: No active loan found for BillRef [%s] or MSISDN [%s] [TransID: %s]',
+                        $callback->bill_ref_number,
+                        $callback->msisdn,
+                        $callback->trans_id
+                    ));
+                    return;
+                }
+
+                $amount = (string) $callback->trans_amount;
+                $reference = (string) $callback->trans_id;
+
+                // 1. Execute Legal Payment Waterfall
+                $waterfall = $this->waterfallService->executeWaterfall(
+                    loan: $loan,
+                    amount: $amount,
+                    reference: $reference,
+                    source: 'MPESA_PAYBILL_C2B'
+                );
+
+                // 2. Post Balanced Double-Entry General Ledger Entry
+                $this->glService->recordRepaymentPosting(
+                    loan: $loan,
+                    feesPaid: $waterfall['allocated_fees'],
+                    interestPaid: $waterfall['allocated_interest'],
+                    principalPaid: $waterfall['allocated_principal'],
+                    overpayment: $waterfall['overpayment_credit'],
+                    reference: $reference
+                );
+
+                $callback->update(['is_reconciled' => true]);
+            } elseif ($sourceType === 'STK') {
+                $stk = MpesaStkRequest::query()->where('id', $recordId)->lockForUpdate()->firstOrFail();
+                if ($stk->status !== 'successful' || $stk->loan_id === null) {
+                    return;
+                }
+
+                $loan = Loan::query()->where('id', $stk->loan_id)->firstOrFail();
+                $amount = (string) $stk->amount;
+                $reference = (string) $stk->mpesa_receipt_number;
+
+                // 1. Execute Legal Payment Waterfall
+                $waterfall = $this->waterfallService->executeWaterfall(
+                    loan: $loan,
+                    amount: $amount,
+                    reference: $reference,
+                    source: 'MPESA_STK_PUSH'
+                );
+
+                // 2. Post Balanced Double-Entry General Ledger Entry
+                $this->glService->recordRepaymentPosting(
+                    loan: $loan,
+                    feesPaid: $waterfall['allocated_fees'],
+                    interestPaid: $waterfall['allocated_interest'],
+                    principalPaid: $waterfall['allocated_principal'],
+                    overpayment: $waterfall['overpayment_credit'],
+                    reference: $reference
+                );
+            }
+        });
+    }
+
+    /**
+     * Resolves active loan by Loan Number, Application Number, or borrower's registered phone.
+     */
+    private function resolveLoanFromReference(string $reference, string $phone): ?Loan
+    {
+        // 1. Match exact loan number (e.g. LN-B2C-01)
+        $loan = Loan::query()->where('loan_number', $reference)->first();
+        if ($loan !== null) {
+            return $loan;
+        }
+
+        // 2. Match active borrower loan by phone
+        return Loan::query()
+            ->whereHas('borrower', fn ($q) => $q->where('phone_number', $phone))
+            ->whereIn('status', ['disbursed', 'defaulted', 'watch'])
+            ->latest('id')
+            ->first();
+    }
+}

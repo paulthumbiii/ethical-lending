@@ -1,0 +1,1375 @@
+===== routes\api.php ===== 
+<?php
+
+use App\Http\Controllers\MpesaWebhookController;
+use App\Http\Controllers\UssdController;
+use Illuminate\Support\Facades\Route;
+
+Route::prefix('v1')->group(function () {
+    // Safaricom M-Pesa Webhooks (/api/v1/mpesa/*)
+    Route::prefix('mpesa')->group(function () {
+        Route::post('/c2b-validation', [MpesaWebhookController::class, 'c2bValidation']);
+        Route::post('/c2b-confirmation', [MpesaWebhookController::class, 'c2bConfirmation']);
+        Route::post('/stk-callback', [MpesaWebhookController::class, 'stkCallback']);
+    });
+
+    // Africa's Talking USSD Gateway (/api/v1/ussd)
+    Route::post('/ussd', [UssdController::class, 'handleUssd']);
+});===== routes\web.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use App\Enums\UserRole;
+use App\Http\Controllers\Auth\LoginController;
+use App\Http\Controllers\Auth\RegisterController;
+use App\Http\Controllers\Borrower\PaymentController;
+use App\Http\Controllers\Borrower\PortalController;
+use App\Http\Controllers\Borrower\RestructuringController;
+use App\Http\Controllers\ContractVerificationController;
+use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\Lender\CollectionsWorkbenchController;
+use App\Http\Controllers\Lender\MakerCheckerController;
+use Illuminate\Support\Facades\Route;
+use Spatie\Permission\Middleware\RoleMiddleware;
+
+Route::get('/verify/contract/{code}', [ContractVerificationController::class, 'verify'])->name('contract.verify');
+
+Route::get('/', function () {
+    return view('welcome');
+});
+
+Route::middleware('guest')->group(function () {
+    Route::get('/login', [LoginController::class, 'create'])->name('login');
+    Route::post('/login', [LoginController::class, 'store'])->middleware('throttle:5,1')->name('login.store');
+
+    Route::get('/register', [RegisterController::class, 'create'])->name('register');
+    Route::post('/register', [RegisterController::class, 'store'])->middleware('throttle:5,1')->name('register.store');
+});
+
+Route::post('/logout', [LoginController::class, 'destroy'])->middleware('auth')->name('logout');
+
+Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::staffPipe()])
+    ->prefix('lender')
+    ->name('lender.')
+    ->group(function () {
+        Route::get('/dashboard', [DashboardController::class, 'lender'])->name('dashboard');
+
+        // Dual-control review desk: approvers only (lender_admin, finance_officer).
+        Route::middleware(RoleMiddleware::class . ':' . UserRole::approversPipe())
+            ->prefix('maker-checker')
+            ->name('maker-checker.')
+            ->group(function () {
+                Route::get('/', [MakerCheckerController::class, 'index'])->name('index');
+                Route::post('/{makerCheckerRequest}/approve', [MakerCheckerController::class, 'approve'])->name('approve');
+                Route::post('/{makerCheckerRequest}/reject', [MakerCheckerController::class, 'reject'])->name('reject');
+            });
+
+        // Collections and in-duplum workbench: read-only (GET only, by design).
+        Route::middleware(RoleMiddleware::class . ':' . UserRole::collectionsViewersPipe())
+            ->prefix('collections')
+            ->name('collections.')
+            ->group(function () {
+                Route::get('/', [CollectionsWorkbenchController::class, 'index'])->name('index');
+            });
+    });
+
+Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::Borrower->value])
+    ->prefix('borrower')
+    ->name('borrower.')
+    ->group(function () {
+        Route::get('/dashboard', [PortalController::class, 'show'])->name('dashboard');
+        Route::post('/loans/{loan}/restructuring', [RestructuringController::class, 'accept'])->name('restructuring.accept');
+        Route::post('/loans/{loan}/pay', [PaymentController::class, 'store'])->middleware('throttle:6,1')->name('payment.store');
+    });===== app\Http\Controllers\MpesaWebhookController.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Controllers;
+
+use App\Exceptions\Fintech\DuplicateWebhookException;
+use App\Services\Financial\Mpesa\MpesaWebhookService;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
+use Throwable;
+
+final class MpesaWebhookController extends Controller
+{
+    public function __construct(private readonly MpesaWebhookService $webhookService) {}
+
+    /**
+     * C2B Validation endpoint called by Safaricom prior to confirming Paybill payments.
+     */
+    public function c2bValidation(Request $request): JsonResponse
+    {
+        // Accept all payments by default; account reconciliation happens on confirmation
+        return response()->json([
+            'ResultCode' => 0,
+            'ResultDesc' => 'Accepted',
+        ]);
+    }
+
+    /**
+     * C2B Confirmation endpoint called by Safaricom when cash is received.
+     */
+    public function c2bConfirmation(Request $request): JsonResponse
+    {
+        try {
+            $payload = $request->all();
+            $this->webhookService->ingestC2bConfirmation($payload);
+
+            return response()->json([
+                'ResultCode' => 0,
+                'ResultDesc' => 'Confirmation received successfully',
+            ]);
+        } catch (DuplicateWebhookException $e) {
+            Log::channel('daily')->info($e->getMessage());
+
+            // Acknowledge duplicate safely to Safaricom so they stop retrying
+            return response()->json([
+                'ResultCode' => 0,
+                'ResultDesc' => 'Duplicate acknowledged',
+            ]);
+        } catch (Throwable $e) {
+            Log::channel('daily')->error('Error processing C2B Confirmation webhook: ' . $e->getMessage());
+
+            // Still return 0 to Safaricom to prevent endless retry storms
+            return response()->json([
+                'ResultCode' => 0,
+                'ResultDesc' => 'Ingested with internal logged error',
+            ]);
+        }
+    }
+
+    /**
+     * STK Push Callback endpoint called by Safaricom after Lipa na M-Pesa prompt.
+     */
+    public function stkCallback(Request $request): JsonResponse
+    {
+        try {
+            $payload = $request->all();
+            $this->webhookService->ingestStkCallback($payload);
+
+            return response()->json([
+                'ResultCode' => 0,
+                'ResultDesc' => 'STK callback processed',
+            ]);
+        } catch (DuplicateWebhookException $e) {
+            Log::channel('daily')->info($e->getMessage());
+
+            return response()->json([
+                'ResultCode' => 0,
+                'ResultDesc' => 'Duplicate STK acknowledged',
+            ]);
+        } catch (Throwable $e) {
+            Log::channel('daily')->error('Error processing STK Callback: ' . $e->getMessage());
+
+            return response()->json([
+                'ResultCode' => 0,
+                'ResultDesc' => 'Error logged internally',
+            ]);
+        }
+    }
+}===== app\Services\Customer\BorrowerOnboardingService.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Customer;
+
+use App\Enums\RiskBand;
+use App\Enums\UserRole;
+use App\Exceptions\Fintech\DataProtectionConsentMissingException;
+use App\Models\AuditTrail;
+use App\Models\Borrower;
+use App\Models\BorrowerFinancialProfile;
+use App\Models\DataProtectionConsent;
+use App\Models\User;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Validation\ValidationException;
+use Spatie\Permission\Models\Role;
+
+final class BorrowerOnboardingService
+{
+    /**
+     * Executes borrower registration, financial profiling, KDPA 2019 consent logging, login creation
+     * (when a password is supplied) and audit tracking inside an atomic transaction.
+     *
+     * @param array $data Validated input data from BorrowerRegistrationRequest
+     * @param string|null $ipAddress Client IP address
+     * @param string|null $userAgent Client User Agent string
+     * @return Borrower
+     * @throws DataProtectionConsentMissingException
+     * @throws ValidationException When the phone or email already belongs to a login account
+     */
+    public function register(array $data, ?string $ipAddress = null, ?string $userAgent = null): Borrower
+    {
+        $consentGranted = filter_var($data['data_protection_consent'] ?? false, FILTER_VALIDATE_BOOLEAN);
+
+        if (! $consentGranted) {
+            throw new DataProtectionConsentMissingException($data['id_number'] ?? 'UNKNOWN');
+        }
+
+        return DB::transaction(function () use ($data, $ipAddress, $userAgent) {
+            $normalizedPhone = $this->normalizePhoneNumber((string) $data['phone_number']);
+
+            $password = isset($data['password']) && $data['password'] !== ''
+                ? (string) $data['password']
+                : null;
+
+            $email = isset($data['email']) && $data['email'] !== ''
+                ? (string) $data['email']
+                : null;
+
+            $user = null;
+
+            if ($password !== null) {
+                $this->assertLoginDetailsAvailable($normalizedPhone, $email);
+
+                /** @var User $user */
+                $user = User::create([
+                    'name' => $data['full_name'],
+                    'email' => $email ?? $this->placeholderEmail($normalizedPhone),
+                    'password' => $password, // hashed by the User model cast
+                    'phone_number' => $normalizedPhone,
+                    'is_active' => true,
+                ]);
+
+                Role::findOrCreate(UserRole::Borrower->value, 'web');
+                $user->assignRole(UserRole::Borrower->value);
+            }
+
+            /** @var Borrower $borrower */
+            $borrower = Borrower::create([
+                'user_id' => $user?->id,
+                'full_name' => $data['full_name'],
+                'id_number' => $data['id_number'],
+                'kra_pin' => isset($data['kra_pin']) ? strtoupper((string) $data['kra_pin']) : null,
+                'phone_number' => $normalizedPhone,
+                'email' => $data['email'] ?? null,
+                'credit_limit' => '0.00',
+                'risk_band' => RiskBand::C,
+                'is_blacklisted' => false,
+            ]);
+
+            BorrowerFinancialProfile::create([
+                'borrower_id' => $borrower->id,
+                'monthly_income' => $data['monthly_income'],
+                'monthly_expenses' => $data['monthly_expenses'],
+                'mpesa_average_monthly_inflow' => $data['mpesa_average_monthly_inflow'] ?? '0.00',
+                'existing_debt_obligations' => $data['existing_debt_obligations'] ?? '0.00',
+            ]);
+
+            DataProtectionConsent::create([
+                'borrower_id' => $borrower->id,
+                'consent_type' => 'CREDIT_SCORING_AND_M_PESA_DATA_PROCESSING',
+                'is_granted' => true,
+                'ip_address' => $ipAddress ?? '127.0.0.1',
+                'user_agent' => $userAgent ?? 'SYSTEM',
+                'granted_at' => now(),
+            ]);
+
+            AuditTrail::create([
+                'user_id' => auth()->id(),
+                'action' => 'BORROWER_ONBOARDED',
+                'auditable_type' => Borrower::class,
+                'auditable_id' => $borrower->id,
+                'old_values' => null,
+                'new_values' => [
+                    'id_number' => $borrower->id_number,
+                    'phone_number' => $borrower->phone_number,
+                    'risk_band' => $borrower->risk_band->value,
+                    'login_created' => $user !== null,
+                ],
+                'ip_address' => $ipAddress ?? '127.0.0.1',
+                'user_agent' => $userAgent ?? 'SYSTEM',
+            ]);
+
+            Log::channel('fintech')->info("Borrower onboarding successful: ID {$borrower->id} [{$borrower->id_number}]");
+
+            return $borrower;
+        });
+    }
+
+    /**
+     * Stops registration cleanly if the phone or email already belongs to a login account.
+     *
+     * @throws ValidationException
+     */
+    private function assertLoginDetailsAvailable(string $phone, ?string $email): void
+    {
+        $errors = [];
+
+        if (User::query()->where('phone_number', $phone)->exists()) {
+            $errors['phone_number'] = 'This phone number already has an account. Try signing in instead.';
+        }
+
+        if ($email !== null && User::query()->where('email', $email)->exists()) {
+            $errors['email'] = 'This email address already has an account.';
+        }
+
+        if ($errors !== []) {
+            throw ValidationException::withMessages($errors);
+        }
+    }
+
+    /**
+     * Borrowers without an email sign in by phone. The reserved .invalid ending can never be a real address.
+     */
+    private function placeholderEmail(string $normalizedPhone): string
+    {
+        return $normalizedPhone . '@borrowers.ethical-lending.invalid';
+    }
+
+    /**
+     * Normalizes Kenyan phone numbers to E.164 Safaricom format (2547XXXXXXXX or 2541XXXXXXXX).
+     */
+    private function normalizePhoneNumber(string $phone): string
+    {
+        $cleaned = preg_replace('/\D/', '', $phone);
+
+        if (str_starts_with($cleaned, '0')) {
+            return '254'.substr($cleaned, 1);
+        }
+
+        if (str_starts_with($cleaned, '7') || str_starts_with($cleaned, '1')) {
+            return '254'.$cleaned;
+        }
+
+        return $cleaned;
+    }
+}===== app\Services\Governance\MakerCheckerService.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Governance;
+
+use App\Models\AuditTrail;
+use App\Models\LoanApplication;
+use App\Models\MakerCheckerRequest;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use RuntimeException;
+
+final class MakerCheckerService
+{
+    /**
+     * Creates a pending dual-control authorization request.
+     *
+     * @param int $makerUserId
+     * @string $actionType (e.g., 'APPROVE_LOAN_DISBURSEMENT', 'WAIVE_INTEREST')
+     * @string $targetEntityType
+     * @int $targetEntityId
+     * @array $payload
+     * @return MakerCheckerRequest
+     */
+    public function createPendingRequest(
+        int $makerUserId,
+        string $actionType,
+        string $targetEntityType,
+        int $targetEntityId,
+        array $payload = []
+    ): MakerCheckerRequest {
+        return MakerCheckerRequest::create([
+            'maker_user_id' => $makerUserId,
+            'action_type' => $actionType,
+            'target_entity_type' => $targetEntityType,
+            'target_entity_id' => $targetEntityId,
+            'payload' => $payload,
+            'status' => 'pending',
+        ]);
+    }
+
+    /**
+     * Authorizes and executes a pending request under strict non-self-approval enforcement.
+     *
+     * @param int $requestId
+     * @param int $checkerUserId
+     * @param string|null $checkerNotes
+     * @return array
+     * @throws RuntimeException
+     */
+    public function authorizeRequest(int $requestId, int $checkerUserId, ?string $checkerNotes = null): array
+    {
+        return DB::transaction(function () use ($requestId, $checkerUserId, $checkerNotes) {
+            /** @var MakerCheckerRequest $request */
+            $request = MakerCheckerRequest::where('id', $requestId)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            if ($request->status !== 'pending') {
+                throw new RuntimeException("Maker-Checker Request #{$requestId} is not in pending status.");
+            }
+
+            // Dual-Control Requirement: Checker MUST NOT be the Maker.
+            // Compared as integers so a driver that returns ids as strings cannot slip past the check.
+            if ((int) $request->maker_user_id === $checkerUserId) {
+                Log::channel('fintech')->warning("Dual-Control Violation Attempt: User #{$checkerUserId} attempted self-approval on Request #{$requestId}");
+                throw new RuntimeException("Dual-Control Violation: You cannot authorize a request you initiated.");
+            }
+
+            $request->update([
+                'status' => 'approved',
+                'checker_user_id' => $checkerUserId,
+                'checker_notes' => $checkerNotes,
+                'actioned_at' => now(),
+            ]);
+
+            // Execute specific state mutation based on action type
+            if ($request->action_type === 'APPROVE_LOAN_APPLICATION') {
+                /** @var LoanApplication|null $app */
+                $app = LoanApplication::where('id', $request->target_entity_id)->first();
+                if ($app) {
+                    $app->update(['status' => 'approved']);
+                }
+            }
+
+            // Record immutable Audit Trail
+            AuditTrail::create([
+                'user_id' => $checkerUserId,
+                'action' => 'MAKER_CHECKER_AUTHORIZED',
+                'auditable_type' => MakerCheckerRequest::class,
+                'auditable_id' => $request->id,
+                'old_values' => ['status' => 'pending'],
+                'new_values' => [
+                    'status' => 'approved',
+                    'action_type' => $request->action_type,
+                    'checker_user_id' => $checkerUserId,
+                ],
+                'ip_address' => request()->ip() ?? '127.0.0.1',
+                'user_agent' => request()->userAgent() ?? 'SYSTEM',
+            ]);
+
+            Log::channel('fintech')->info("Maker-Checker Request #{$requestId} [{$request->action_type}] authorized by Checker #{$checkerUserId}");
+
+            return [
+                'request_id' => $request->id,
+                'action_type' => $request->action_type,
+                'status' => 'approved',
+            ];
+        });
+    }
+
+    /**
+     * Rejects a pending dual-control request and records the decision on the audit trail.
+     */
+    public function rejectRequest(int $requestId, int $checkerUserId, string $reason): array
+    {
+        return DB::transaction(function () use ($requestId, $checkerUserId, $reason) {
+            /** @var MakerCheckerRequest $request */
+            $request = MakerCheckerRequest::where('id', $requestId)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            if ($request->status !== 'pending') {
+                throw new RuntimeException("Maker-Checker Request #{$requestId} is not in pending status.");
+            }
+
+            if ((int) $request->maker_user_id === $checkerUserId) {
+                Log::channel('fintech')->warning("Dual-Control Violation Attempt: User #{$checkerUserId} attempted to reject own Request #{$requestId}");
+                throw new RuntimeException("Dual-Control Violation: You cannot reject/action a request you initiated.");
+            }
+
+            $request->update([
+                'status' => 'rejected',
+                'checker_user_id' => $checkerUserId,
+                'checker_notes' => $reason,
+                'actioned_at' => now(),
+            ]);
+
+            AuditTrail::create([
+                'user_id' => $checkerUserId,
+                'action' => 'MAKER_CHECKER_REJECTED',
+                'auditable_type' => MakerCheckerRequest::class,
+                'auditable_id' => $request->id,
+                'old_values' => ['status' => 'pending'],
+                'new_values' => [
+                    'status' => 'rejected',
+                    'action_type' => $request->action_type,
+                    'checker_user_id' => $checkerUserId,
+                    'reason' => $reason,
+                ],
+                'ip_address' => request()->ip() ?? '127.0.0.1',
+                'user_agent' => request()->userAgent() ?? 'SYSTEM',
+            ]);
+
+            Log::channel('fintech')->info("Maker-Checker Request #{$requestId} [{$request->action_type}] rejected by Checker #{$checkerUserId}");
+
+            return [
+                'request_id' => $request->id,
+                'status' => 'rejected',
+            ];
+        });
+    }
+}===== app\Services\Financial\Mpesa\MpesaSimulationHarness.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Financial\Mpesa;
+
+use App\Models\Loan;
+use App\Models\MpesaStkRequest;
+use Carbon\CarbonImmutable;
+use Illuminate\Support\Str;
+
+final class MpesaSimulationHarness
+{
+    public function __construct(private readonly MpesaWebhookService $webhookService) {}
+
+    /**
+     * Simulates an inbound C2B Paybill repayment from a borrower.
+     *
+     * @return array{
+     *     status: string,
+     *     trans_id: string,
+     *     amount: string,
+     *     loan_number: string,
+     *     payload: array<string, mixed>
+     * }
+     */
+    public function simulateC2bPayment(
+        Loan $loan,
+        string $amount,
+        ?string $transId = null,
+        ?string $phone = null
+    ): array {
+        $transId = $transId ?? 'SIM' . strtoupper(Str::random(8));
+        $phone = $phone ?? (string) $loan->borrower->phone_number;
+
+        $payload = [
+            'TransactionType'   => 'Pay Utility',
+            'TransID'           => $transId,
+            'TransTime'         => CarbonImmutable::now()->format('YmdHis'),
+            'TransAmount'       => number_format((float) $amount, 2, '.', ''),
+            'BusinessShortCode' => (string) config('mpesa.shortcode', '174379'),
+            'BillRefNumber'     => (string) $loan->loan_number,
+            'InvoiceNumber'     => 'INV-' . strtoupper(Str::random(6)),
+            'OrgAccountBalance' => '500000.00',
+            'ThirdPartyTransID' => null,
+            'MSISDN'            => $phone,
+            'FirstName'         => (string) ($loan->borrower->full_name ?? 'Simulated Borrower'),
+        ];
+
+        // Ingest into webhook pipeline (automatically dispatches queue job to reconcile)
+        $this->webhookService->ingestC2bConfirmation($payload);
+
+        return [
+            'status'      => 'processed',
+            'trans_id'    => $transId,
+            'amount'      => $amount,
+            'loan_number' => $loan->loan_number,
+            'payload'     => $payload,
+        ];
+    }
+
+    /**
+     * Simulates a successful Lipa na M-Pesa STK Push repayment.
+     *
+     * @return array{
+     *     checkout_request_id: string,
+     *     receipt_number: string,
+     *     amount: string,
+     *     status: string
+     * }
+     */
+    public function simulateStkSuccess(
+        Loan $loan,
+        string $amount,
+        ?string $receiptNumber = null
+    ): array {
+        $checkoutRequestId = 'ws_SIM_' . strtoupper(Str::random(12));
+        $merchantRequestId = 'MERCH_' . strtoupper(Str::random(8));
+        $receiptNumber = $receiptNumber ?? 'QHD' . strtoupper(Str::random(7));
+        $phone = (string) $loan->borrower->phone_number;
+
+        // 1. Create simulated pending STK request
+        $stk = MpesaStkRequest::create([
+            'loan_id'              => $loan->id,
+            'merchant_request_id'  => $merchantRequestId,
+            'checkout_request_id'  => $checkoutRequestId,
+            'phone_number'         => $phone,
+            'amount'               => $amount,
+            'status'               => 'pending',
+        ]);
+
+        // 2. Synthesize authentic Safaricom Callback Metadata
+        $callbackPayload = [
+            'Body' => [
+                'stkCallback' => [
+                    'MerchantRequestID' => $merchantRequestId,
+                    'CheckoutRequestID' => $checkoutRequestId,
+                    'ResultCode'        => 0,
+                    'ResultDesc'        => 'The service request is processed successfully.',
+                    'CallbackMetadata'  => [
+                        'Item' => [
+                            ['Name' => 'Amount', 'Value' => (float) $amount],
+                            ['Name' => 'MpesaReceiptNumber', 'Value' => $receiptNumber],
+                            ['Name' => 'Balance', 'Value' => 0.00],
+                            ['Name' => 'TransactionDate', 'Value' => (int) CarbonImmutable::now()->format('YmdHis')],
+                            ['Name' => 'PhoneNumber', 'Value' => (int) $phone],
+                        ],
+                    ],
+                ],
+            ],
+        ];
+
+        // 3. Ingest into webhook pipeline
+        $this->webhookService->ingestStkCallback($callbackPayload);
+
+        return [
+            'checkout_request_id' => $checkoutRequestId,
+            'receipt_number'      => $receiptNumber,
+            'amount'              => $amount,
+            'status'              => 'successful',
+        ];
+    }
+
+    /**
+     * Simulates a user-cancelled STK Push prompt (PIN cancelled by borrower).
+     */
+    public function simulateStkCancelled(Loan $loan, string $amount): MpesaStkRequest
+    {
+        $checkoutRequestId = 'ws_CANCEL_' . strtoupper(Str::random(12));
+        $merchantRequestId = 'MERCH_' . strtoupper(Str::random(8));
+
+        MpesaStkRequest::create([
+            'loan_id'              => $loan->id,
+            'merchant_request_id'  => $merchantRequestId,
+            'checkout_request_id'  => $checkoutRequestId,
+            'phone_number'         => (string) $loan->borrower->phone_number,
+            'amount'               => $amount,
+            'status'               => 'pending',
+        ]);
+
+        $cancelPayload = [
+            'Body' => [
+                'stkCallback' => [
+                    'MerchantRequestID' => $merchantRequestId,
+                    'CheckoutRequestID' => $checkoutRequestId,
+                    'ResultCode'        => 1032,
+                    'ResultDesc'        => 'Request cancelled by user',
+                ],
+            ],
+        ];
+
+        return $this->webhookService->ingestStkCallback($cancelPayload);
+    }
+}===== app\Models\MpesaB2cDisbursement.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+final class MpesaB2cDisbursement extends Model
+{
+    protected $table = 'mpesa_b2c_disbursements';
+
+    protected $fillable = [
+        'loan_id',
+        'originator_conversation_id',
+        'conversation_id',
+        'transaction_id',
+        'recipient_phone',
+        'amount',
+        'status',
+        'response_code',
+        'response_description',
+        'disbursed_at',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'amount'       => 'decimal:2',
+            'disbursed_at' => 'datetime',
+        ];
+    }
+
+    public function loan(): BelongsTo
+    {
+        return $this->belongsTo(Loan::class, 'loan_id');
+    }
+}===== app\Models\ProductInterestRule.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+final class ProductInterestRule extends Model
+{
+    protected $fillable = [
+        'loan_product_id',
+        'tier_name',
+        'annual_rate',
+        'monthly_rate',
+        'compounding_frequency',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'annual_rate'  => 'decimal:2',
+            'monthly_rate' => 'decimal:2',
+        ];
+    }
+
+    public function product(): BelongsTo
+    {
+        return $this->belongsTo(LoanProduct::class, 'loan_product_id');
+    }
+}===== app\Models\FeeMatrix.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+final class FeeMatrix extends Model
+{
+    protected $table = 'fee_matrices';
+
+    protected $fillable = [
+        'loan_product_id',
+        'fee_name',
+        'calculation_type',
+        'fee_amount',
+        'fee_percentage',
+        'is_excise_duty_applicable',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'fee_amount'                 => 'decimal:2',
+            'fee_percentage'             => 'decimal:2',
+            'is_excise_duty_applicable' => 'boolean',
+        ];
+    }
+
+    public function product(): BelongsTo
+    {
+        return $this->belongsTo(LoanProduct::class, 'loan_product_id');
+    }
+}===== app\Services\Customer\BorrowerPortalService.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Customer;
+
+use App\Enums\LoanStatus;
+use App\Models\Borrower;
+use App\Models\Loan;
+use App\Models\LoanLedgerEntry;
+use App\Services\Servicing\RestructuringEngine;
+use Carbon\CarbonImmutable;
+use Illuminate\Support\Facades\DB;
+
+final class BorrowerPortalService
+{
+    /** Extra days of time a borrower can choose from. */
+    public const EXTENSION_OPTIONS = [14, 21, 30, 45, 60];
+
+    public const DEFAULT_EXTENSION_DAYS = 30;
+
+    /** Mirrors the threshold inside RestructuringEngine. The engine remains the final judge. */
+    private const MINIMUM_ELIGIBILITY_RATIO = '0.30';
+
+    public function __construct(private readonly RestructuringEngine $engine)
+    {
+    }
+
+    /**
+     * Everything the borrower dashboard needs.
+     *
+     * @return array<string, mixed>
+     */
+    public function summary(Borrower $borrower): array
+    {
+        $loan = $this->currentLoan($borrower);
+
+        if ($loan === null) {
+            return ['loan' => null];
+        }
+
+        $balances = $this->balances($loan);
+        $owed = $this->owed($balances);
+        $due = $loan->due_date !== null ? CarbonImmutable::parse($loan->due_date) : null;
+
+        return [
+            'loan'       => $loan,
+            'balances'   => $balances,
+            'owed'       => $owed,
+            'due_date'   => $due?->format('j M Y'),
+            'is_overdue' => $due !== null && $due->endOfDay()->isPast() && bccomp($owed, '0.00', 2) > 0,
+            'meter'      => $this->inDuplumMeter($loan),
+            'relief'     => $this->canRequestRelief($loan) ? $this->reliefPreview($borrower, $balances) : null,
+        ];
+    }
+
+    /** The borrower's latest loan that is not settled or written off. */
+    public function currentLoan(Borrower $borrower): ?Loan
+    {
+        /** @var Loan|null $loan */
+        $loan = $borrower->loans()
+            ->whereNotIn('status', [LoanStatus::SETTLED->value, LoanStatus::WRITTEN_OFF->value])
+            ->with('inDuplumTracking')
+            ->latest('id')
+            ->first();
+
+        return $loan;
+    }
+
+    /**
+     * Latest balances from the append-only ledger.
+     *
+     * @return array{principal: string, interest: string, fees: string}
+     */
+    public function balances(Loan $loan): array
+    {
+        $latest = LoanLedgerEntry::query()->where('loan_id', $loan->id)->latest('id')->first();
+
+        if ($latest === null) {
+            return [
+                'principal' => (string) $loan->principal_disbursed,
+                'interest'  => '0.00',
+                'fees'      => '0.00',
+            ];
+        }
+
+        return [
+            'principal' => (string) $latest->running_principal_balance,
+            'interest'  => (string) $latest->running_interest_balance,
+            'fees'      => (string) $latest->running_fees_balance,
+        ];
+    }
+
+    /**
+     * Data for the Section 44A safety meter.
+     * States: not_triggered (no default yet), accruing (charges counting), frozen (cap reached).
+     *
+     * @return array{state: string, accrued: string, cap: string, percent: string, headroom: string}
+     */
+    public function inDuplumMeter(Loan $loan): array
+    {
+        $tracking = $loan->inDuplumTracking;
+
+        if ($tracking === null) {
+            return [
+                'state'    => 'not_triggered',
+                'accrued'  => '0.00',
+                'cap'      => '0.00',
+                'percent'  => '0.00',
+                'headroom' => '0.00',
+            ];
+        }
+
+        $accrued = bcadd(
+            (string) $tracking->total_post_default_interest,
+            (string) $tracking->total_post_default_penalties,
+            2
+        );
+        $cap = (string) $tracking->statutory_cap_limit;
+
+        $percent = '0.00';
+        if (bccomp($cap, '0.00', 2) > 0) {
+            $percent = bcmul(bcdiv($accrued, $cap, 4), '100', 2);
+            if (bccomp($percent, '100.00', 2) > 0) {
+                $percent = '100.00';
+            }
+        }
+
+        $headroom = bcsub($cap, $accrued, 2);
+        if (bccomp($headroom, '0.00', 2) < 0) {
+            $headroom = '0.00';
+        }
+
+        $frozen = (bool) $tracking->is_frozen || (bool) $loan->is_in_duplum_locked;
+
+        return [
+            'state'    => $frozen ? 'frozen' : 'accruing',
+            'accrued'  => $accrued,
+            'cap'      => $cap,
+            'percent'  => $percent,
+            'headroom' => $headroom,
+        ];
+    }
+
+    /** Relief is offered on defaulted loans, or disbursed loans past their due date. */
+    public function canRequestRelief(Loan $loan): bool
+    {
+        if ($loan->status === LoanStatus::DEFAULTED) {
+            return true;
+        }
+
+        return $loan->status === LoanStatus::DISBURSED
+            && $loan->due_date !== null
+            && CarbonImmutable::parse($loan->due_date)->endOfDay()->isPast();
+    }
+
+    /**
+     * A read-only preview that follows the same rules as RestructuringEngine
+     * (penalties forgiven, interest kept, balance split into two instalments).
+     * Nothing is saved here.
+     *
+     * @param  array{principal: string, interest: string, fees: string}  $balances
+     * @return array<string, mixed>
+     */
+    public function reliefPreview(Borrower $borrower, array $balances): array
+    {
+        $ratio = $this->engine->calculateRepaymentRatio($borrower);
+
+        $owedToday = $this->owed($balances);
+        $owedAfter = bcadd($balances['principal'], $balances['interest'], 2);
+
+        $first = bcdiv($owedAfter, '2.00', 2);
+        $remainder = bcsub($owedAfter, bcmul($first, '2.00', 2), 2);
+        $second = bcadd($first, $remainder, 2);
+
+        $today = CarbonImmutable::now();
+        $schedule = [];
+        foreach (self::EXTENSION_OPTIONS as $days) {
+            $schedule[$days] = [
+                'first_due'  => $today->addDays(intdiv($days, 2))->format('j M Y'),
+                'second_due' => $today->addDays($days)->format('j M Y'),
+            ];
+        }
+
+        return [
+            'eligible'     => bccomp($ratio, self::MINIMUM_ELIGIBILITY_RATIO, 2) >= 0,
+            'owed_today'   => $owedToday,
+            'waived'       => $balances['fees'],
+            'owed_after'   => $owedAfter,
+            'first_amount' => $first,
+            'second_amount' => $second,
+            'options'      => self::EXTENSION_OPTIONS,
+            'default_days' => self::DEFAULT_EXTENSION_DAYS,
+            'schedule'     => $schedule,
+        ];
+    }
+
+    /**
+     * Creates and accepts a restructuring proposal in one transaction,
+     * using the same engine the lender side relies on.
+     */
+    public function acceptRelief(Loan $loan, int $extensionDays): Loan
+    {
+        if (! in_array($extensionDays, self::EXTENSION_OPTIONS, true)) {
+            throw new \InvalidArgumentException('Unsupported extension period.');
+        }
+
+        if (! $this->canRequestRelief($loan)) {
+            throw new \DomainException('This loan is not in arrears, so relief cannot be requested.');
+        }
+
+        return DB::transaction(function () use ($loan, $extensionDays): Loan {
+            $proposal = $this->engine->generateProposal($loan, $extensionDays);
+
+            return $this->engine->acceptProposal($proposal);
+        });
+    }
+
+    /** @param array{principal: string, interest: string, fees: string} $balances */
+    private function owed(array $balances): string
+    {
+        return bcadd(bcadd($balances['principal'], $balances['interest'], 2), $balances['fees'], 2);
+    }
+}===== resources\views\borrower\dashboard.blade.php ===== 
+@php
+    $money = fn (string $v): string => 'KES ' . number_format((float) $v, 2);
+@endphp
+<x-layouts.borrower title="Home">
+    <h1 class="text-xl font-semibold">Hello, {{ \Illuminate\Support\Str::of(auth()->user()->name)->before(' ') }}</h1>
+
+    @if (session('status'))
+        <div class="mt-4 rounded-lg border border-brand-500 bg-brand-50 px-4 py-3 text-sm text-brand-900" role="status">{{ session('status') }}</div>
+    @endif
+
+    @error('relief')
+        <div class="mt-4 rounded-lg border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-800" role="alert">{{ $message }}</div>
+    @enderror
+
+    @if (! $borrower)
+        <x-card class="mt-5">
+            <p class="text-sm text-muted">Your borrower profile is not linked to this login yet. Contact support to finish setting it up.</p>
+        </x-card>
+    @elseif ($portal['loan'] === null)
+        <x-card title="Your credit limit" class="mt-5">
+            <p class="text-3xl font-semibold tabular-nums">{{ $money((string) $borrower->credit_limit) }}</p>
+        </x-card>
+        <x-card class="mt-4">
+            <p class="text-sm text-muted">You have no active loan right now.</p>
+        </x-card>
+    @else
+        @php
+            $loan = $portal['loan'];
+            $tone = match ($loan->status->value) {
+                'defaulted' => 'danger',
+                'pending', 'approval_hold' => 'warning',
+                'restructured' => 'success',
+                default => 'info',
+            };
+        @endphp
+
+        <x-card class="mt-5">
+            <div class="flex items-start justify-between gap-3">
+                <div>
+                    <p class="text-sm text-muted">Loan {{ $loan->loan_number }}</p>
+                    <p class="mt-1 text-3xl font-semibold tabular-nums">{{ $money($portal['owed']) }}</p>
+                    <p class="text-sm text-muted">you owe in total</p>
+                </div>
+                <x-badge :tone="$tone">{{ \Illuminate\Support\Str::headline($loan->status->value) }}</x-badge>
+            </div>
+
+            <dl class="mt-4 divide-y divide-line text-sm">
+                <div class="flex justify-between py-2"><dt class="text-muted">Principal</dt><dd class="tabular-nums">{{ $money($portal['balances']['principal']) }}</dd></div>
+                <div class="flex justify-between py-2"><dt class="text-muted">Interest</dt><dd class="tabular-nums">{{ $money($portal['balances']['interest']) }}</dd></div>
+                <div class="flex justify-between py-2"><dt class="text-muted">Penalties and fees</dt><dd class="tabular-nums">{{ $money($portal['balances']['fees']) }}</dd></div>
+                <div class="flex items-center justify-between py-2">
+                    <dt class="text-muted">Due date</dt>
+                    <dd class="flex items-center gap-2">
+                        <span>{{ $portal['due_date'] ?? 'Not set' }}</span>
+                        @if ($portal['is_overdue'])
+                            <x-badge tone="danger">Overdue</x-badge>
+                        @endif
+                    </dd>
+                </div>
+            </dl>
+        </x-card>
+                @php
+            $ceiling = (int) bcadd($portal['owed'], '0.99', 0);
+        @endphp
+        @if (in_array($loan->status->value, ['disbursed', 'defaulted', 'restructured'], true) && $ceiling >= 1)
+            <x-repayment-form :loan="$loan" :ceiling="$ceiling" :phone="(string) $borrower->phone_number" class="mt-5" />
+        @endif
+
+        <x-in-duplum-meter :meter="$portal['meter']" class="mt-5" />
+
+        @if ($relief = $portal['relief'])
+            <x-card title="Finding it hard to pay?" class="mt-5">
+                @if (! $relief['eligible'])
+                    <p class="text-sm text-muted">We cannot offer a relief plan online right now. Please contact support and we will look at your options with you.</p>
+                @else
+                    <div x-data="{
+                            options: {{ \Illuminate\Support\Js::from($relief['options']) }},
+                            plans: {{ \Illuminate\Support\Js::from($relief['schedule']) }},
+                            idx: {{ (int) array_search($relief['default_days'], $relief['options'], true) }},
+                            get days() { return this.options[this.idx]; }
+                        }">
+                        <p class="text-sm text-muted">If you cannot pay in full, you can ask for more time. Penalties and fees are removed and you pay what is left in two parts.</p>
+
+                        <dl class="mt-4 divide-y divide-line text-sm">
+                            <div class="flex justify-between py-2"><dt class="text-muted">You owe today</dt><dd class="tabular-nums">{{ $money($relief['owed_today']) }}</dd></div>
+                            <div class="flex justify-between py-2"><dt class="text-muted">Penalties and fees removed</dt><dd class="tabular-nums text-emerald-700">- {{ $money($relief['waived']) }}</dd></div>
+                            <div class="flex justify-between py-2 font-semibold"><dt>You would owe after relief</dt><dd class="tabular-nums">{{ $money($relief['owed_after']) }}</dd></div>
+                        </dl>
+
+                        <label for="relief-days" class="mt-5 block text-sm font-medium">
+                            Time to pay: <span x-text="days"></span> days
+                        </label>
+                        <input id="relief-days" type="range" min="0" max="{{ count($relief['options']) - 1 }}" step="1"
+                               x-model.number="idx" class="mt-2 w-full accent-brand-700">
+
+                        <ol class="mt-4 space-y-2 text-sm">
+                            <li class="flex justify-between gap-3">
+                                <span>Payment 1 by <span class="font-medium" x-text="plans[days].first_due"></span></span>
+                                <span class="tabular-nums">{{ $money($relief['first_amount']) }}</span>
+                            </li>
+                            <li class="flex justify-between gap-3">
+                                <span>Payment 2 by <span class="font-medium" x-text="plans[days].second_due"></span></span>
+                                <span class="tabular-nums">{{ $money($relief['second_amount']) }}</span>
+                            </li>
+                        </ol>
+
+                        <form method="POST" action="{{ route('borrower.restructuring.accept', $loan) }}" class="mt-5">
+                            @csrf
+                            <input type="hidden" name="tenure_extension_days" value="{{ $relief['default_days'] }}" x-bind:value="days">
+                            <x-button type="submit" class="w-full">Accept relief plan</x-button>
+                            <p class="mt-2 text-xs text-muted">Accepting changes your payment plan as shown above. It is recorded on your account.</p>
+                        </form>
+                    </div>
+                @endif
+            </x-card>
+        @endif
+    @endif
+</x-layouts.borrower>===== resources\views\components\layouts\borrower.blade.php ===== 
+@props(['title' => 'Home'])
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>{{ $title }} | {{ config('app.name') }}</title>
+    @vite(['resources/css/app.css', 'resources/js/app.js'])
+</head>
+<body class="bg-paper font-sans text-ink antialiased">
+    <header class="border-b border-line bg-white px-4 pb-3 pt-[calc(0.75rem+env(safe-area-inset-top))]">
+        <div class="mx-auto flex max-w-md items-center justify-between">
+            <span class="text-sm font-semibold text-brand-700">{{ config('app.name') }}</span>
+            <span class="text-sm text-muted">{{ auth()->user()->name }}</span>
+        </div>
+    </header>
+
+    <main class="mx-auto max-w-md px-4 pb-28 pt-6">
+        {{ $slot }}
+    </main>
+
+    <nav class="fixed inset-x-0 bottom-0 z-20 border-t border-line bg-white pb-[env(safe-area-inset-bottom)]" aria-label="Main">
+        <div class="mx-auto flex max-w-md items-stretch">
+            <a href="{{ route('borrower.dashboard') }}" aria-current="page"
+               class="flex flex-1 items-center justify-center py-3.5 text-sm font-semibold text-brand-700">Home</a>
+            <form method="POST" action="{{ route('logout') }}" class="flex flex-1">
+                @csrf
+                <button type="submit" class="flex-1 py-3.5 text-sm font-medium text-muted">Sign out</button>
+            </form>
+        </div>
+    </nav>
+</body>
+</html>===== database\migrations\2026_10_05_153404_create_loan_applications_table.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('loan_applications', function (Blueprint $table) {
+            $table->id();
+            $table->string('application_number', 50)->unique();
+            $table->foreignId('borrower_id')->constrained('borrowers')->onDelete('cascade');
+            $table->foreignId('loan_product_id')->constrained('loan_products')->onDelete('restrict');
+            $table->decimal('requested_principal', 12, 2);
+            $table->integer('requested_tenure_days');
+            $table->string('status', 30)->default('submitted');
+            $table->foreignId('underwriter_id')->nullable()->constrained('users')->onDelete('set null');
+            $table->text('rejection_reason')->nullable();
+            $table->timestamps();
+
+            $table->index('application_number');
+            $table->index('status');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('loan_applications');
+    }
+};===== database\migrations\2026_10_05_153358_create_loan_products_table.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('loan_products', function (Blueprint $table) {
+            $table->id();
+            $table->string('name', 100);
+            $table->string('product_code', 20)->unique();
+            $table->decimal('min_principal', 12, 2);
+            $table->decimal('max_principal', 12, 2);
+            $table->integer('default_tenure_days');
+            $table->string('interest_calculation_method', 50);
+            $table->boolean('is_active')->default(true);
+            $table->timestamps();
+
+            $table->index('is_active');
+            $table->index('product_code');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('loan_products');
+    }
+};===== database\migrations\2026_10_05_153354_create_borrower_financial_profiles_table.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('borrower_financial_profiles', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('borrower_id')->unique()->constrained('borrowers')->onDelete('cascade');
+            $table->decimal('monthly_income', 12, 2);
+            $table->decimal('monthly_expenses', 12, 2);
+            $table->decimal('mpesa_average_monthly_inflow', 12, 2)->default(0.00);
+            $table->decimal('existing_debt_obligations', 12, 2)->default(0.00);
+            $table->timestamps();
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('borrower_financial_profiles');
+    }
+};===== database\migrations\2026_10_05_153359_create_product_interest_rules_table.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('product_interest_rules', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('loan_product_id')->constrained('loan_products')->onDelete('cascade');
+            $table->string('tier_name', 50);
+            $table->decimal('annual_rate', 5, 2);
+            $table->decimal('monthly_rate', 5, 2);
+            $table->string('compounding_frequency', 30)->default('none');
+            $table->timestamps();
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('product_interest_rules');
+    }
+};===== database\migrations\2026_10_05_153401_create_fee_matrices_table.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('fee_matrices', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('loan_product_id')->constrained('loan_products')->onDelete('cascade');
+            $table->string('fee_name', 100);
+            $table->string('calculation_type', 30);
+            $table->decimal('fee_amount', 12, 2);
+            $table->decimal('fee_percentage', 5, 2);
+            $table->boolean('is_excise_duty_applicable')->default(true);
+            $table->timestamps();
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('fee_matrices');
+    }
+};===== database\migrations\2026_10_05_174728_create_mpesa_b2c_disbursements_table.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('mpesa_b2c_disbursements', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('loan_id')->constrained('loans')->onDelete('restrict');
+            $table->string('originator_conversation_id', 100)->nullable()->unique();
+            $table->string('conversation_id', 100)->nullable();
+            $table->string('transaction_id', 100)->nullable()->unique();
+            $table->string('recipient_phone', 20);
+            $table->decimal('amount', 12, 2);
+            $table->string('status', 30)->default('initiated');
+            $table->string('response_code', 20)->nullable();
+            $table->text('response_description')->nullable();
+            $table->timestamp('disbursed_at')->nullable();
+            $table->timestamps();
+
+            $table->index('loan_id');
+            $table->index('status');
+            $table->index('transaction_id');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('mpesa_b2c_disbursements');
+    }
+};===== database\migrations\2026_10_05_153407_create_loans_table.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('loans', function (Blueprint $table) {
+            $table->id();
+            $table->string('loan_number', 50)->unique();
+            $table->foreignId('loan_application_id')->unique()->constrained('loan_applications')->onDelete('restrict');
+            $table->foreignId('borrower_id')->constrained('borrowers')->onDelete('restrict');
+            $table->foreignId('loan_product_id')->constrained('loan_products')->onDelete('restrict');
+            $table->decimal('principal_disbursed', 12, 2);
+            $table->decimal('annual_interest_rate', 5, 2);
+            $table->integer('tenure_days');
+            $table->string('status', 30)->default('pending');
+            $table->timestamp('disbursed_at')->nullable();
+            $table->timestamp('due_date')->nullable();
+            $table->timestamp('defaulted_at')->nullable();
+            $table->boolean('is_in_duplum_locked')->default(false);
+            $table->timestamps();
+
+            $table->index('loan_number');
+            $table->index('borrower_id');
+            $table->index('status');
+            $table->index('due_date');
+            $table->index('defaulted_at');
+            $table->index('is_in_duplum_locked');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('loans');
+    }
+};

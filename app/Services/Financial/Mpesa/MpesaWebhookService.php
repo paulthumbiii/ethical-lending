@@ -12,6 +12,7 @@ use App\Models\MpesaStkRequest;
 use App\Services\Financial\GeneralLedgerService;
 use App\Services\Financial\PaymentWaterfallService;
 use Carbon\CarbonImmutable;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -44,17 +45,23 @@ final class MpesaWebhookService
             throw new DuplicateWebhookException($transId, 'SAFARICOM_C2B');
         }
 
-        $callback = MpesaC2bCallback::create([
-            'transaction_type'    => (string) ($payload['TransactionType'] ?? 'Pay Utility'),
-            'trans_id'            => $transId,
-            'trans_time'          => (string) ($payload['TransTime'] ?? CarbonImmutable::now()->format('YmdHis')),
-            'trans_amount'        => $amount,
-            'business_short_code' => (string) ($payload['BusinessShortCode'] ?? config('mpesa.shortcode')),
-            'bill_ref_number'     => $billRef,
-            'msisdn'              => $msisdn,
-            'first_name'          => (string) ($payload['FirstName'] ?? null),
-            'is_reconciled'       => false,
-        ]);
+        try {
+            $callback = MpesaC2bCallback::create([
+                'transaction_type'    => (string) ($payload['TransactionType'] ?? 'Pay Utility'),
+                'trans_id'            => $transId,
+                'trans_time'          => (string) ($payload['TransTime'] ?? CarbonImmutable::now()->format('YmdHis')),
+                'trans_amount'        => $amount,
+                'business_short_code' => (string) ($payload['BusinessShortCode'] ?? config('mpesa.shortcode')),
+                'bill_ref_number'     => $billRef,
+                'msisdn'              => $msisdn,
+                'first_name'          => (string) ($payload['FirstName'] ?? null),
+                'is_reconciled'       => false,
+            ]);
+        } catch (UniqueConstraintViolationException) {
+            // Two identical callbacks arrived at the same instant: the database unique index on
+            // trans_id let only one in. Treat the loser exactly like a normal duplicate.
+            throw new DuplicateWebhookException($transId, 'SAFARICOM_C2B');
+        }
 
         // Dispatch background job for high-concurrency ledger crediting
         ProcessMpesaCallbackJob::dispatch('C2B', $callback->id);
@@ -169,9 +176,27 @@ final class MpesaWebhookService
                     return;
                 }
 
+                $reference = (string) $stk->mpesa_receipt_number;
+
+                // Idempotency guard: the STK row is locked above, so a retried or duplicated job
+                // waits here, then sees the receipt already credited and stops. Without this,
+                // the same receipt could be credited twice.
+                $alreadyCredited = DB::table('payment_waterfall_logs')
+                    ->where('loan_id', $stk->loan_id)
+                    ->where('payment_reference', $reference)
+                    ->exists();
+
+                if ($alreadyCredited) {
+                    Log::channel('daily')->info(sprintf(
+                        'STK repayment skipped: receipt [%s] already credited to loan #%d',
+                        $reference,
+                        $stk->loan_id
+                    ));
+                    return;
+                }
+
                 $loan = Loan::query()->where('id', $stk->loan_id)->firstOrFail();
                 $amount = (string) $stk->amount;
-                $reference = (string) $stk->mpesa_receipt_number;
 
                 // 1. Execute Legal Payment Waterfall
                 $waterfall = $this->waterfallService->executeWaterfall(

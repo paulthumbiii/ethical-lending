@@ -5,6 +5,7 @@ declare(strict_types=1);
 use App\Enums\UserRole;
 use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\Auth\RegisterController;
+use App\Http\Controllers\Borrower\ApplicationController;
 use App\Http\Controllers\Borrower\PaymentController;
 use App\Http\Controllers\Borrower\PortalController;
 use App\Http\Controllers\Borrower\RestructuringController;
@@ -61,6 +62,8 @@ Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::Borrower->val
     ->name('borrower.')
     ->group(function () {
         Route::get('/dashboard', [PortalController::class, 'show'])->name('dashboard');
+        Route::get('/apply', [ApplicationController::class, 'create'])->name('apply.create');
+        Route::post('/apply', [ApplicationController::class, 'store'])->middleware('throttle:5,1')->name('apply.store');
         Route::post('/loans/{loan}/restructuring', [RestructuringController::class, 'accept'])->name('restructuring.accept');
         Route::post('/loans/{loan}/pay', [PaymentController::class, 'store'])->middleware('throttle:6,1')->name('payment.store');
     });
