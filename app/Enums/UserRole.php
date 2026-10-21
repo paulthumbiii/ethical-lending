@@ -65,4 +65,41 @@ enum UserRole: string
     {
         return implode('|', self::collectionsViewers());
     }
+
+    /**
+     * Roles allowed to enter verified inflow and run credit checks.
+     *
+     * @return list<string>
+     */
+    public static function underwriters(): array
+    {
+        return [
+            self::LenderAdmin->value,
+            self::CreditOfficer->value,
+        ];
+    }
+
+    public static function underwritersPipe(): string
+    {
+        return implode('|', self::underwriters());
+    }
+
+    /**
+     * Roles allowed to open the applications queue (finance is view-only).
+     *
+     * @return list<string>
+     */
+    public static function applicationViewers(): array
+    {
+        return [
+            self::LenderAdmin->value,
+            self::CreditOfficer->value,
+            self::FinanceOfficer->value,
+        ];
+    }
+
+    public static function applicationViewersPipe(): string
+    {
+        return implode('|', self::applicationViewers());
+    }
 }

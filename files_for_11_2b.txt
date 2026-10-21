@@ -1,0 +1,649 @@
+===== app\Enums\UserRole.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Enums;
+
+enum UserRole: string
+{
+    case LenderAdmin = 'lender_admin';
+    case CreditOfficer = 'credit_officer';
+    case CollectionsOfficer = 'collections_officer';
+    case FinanceOfficer = 'finance_officer';
+    case Borrower = 'borrower';
+
+    /** @return list<string> */
+    public static function staff(): array
+    {
+        return [
+            self::LenderAdmin->value,
+            self::CreditOfficer->value,
+            self::CollectionsOfficer->value,
+            self::FinanceOfficer->value,
+        ];
+    }
+
+    /** Pipe-separated list, the format Spatie's role middleware expects. */
+    public static function staffPipe(): string
+    {
+        return implode('|', self::staff());
+    }
+
+    /**
+     * Roles allowed to approve or reject maker-checker requests.
+     *
+     * @return list<string>
+     */
+    public static function approvers(): array
+    {
+        return [
+            self::LenderAdmin->value,
+            self::FinanceOfficer->value,
+        ];
+    }
+
+    public static function approversPipe(): string
+    {
+        return implode('|', self::approvers());
+    }
+
+    /**
+     * Roles allowed to open the read-only collections workbench.
+     *
+     * @return list<string>
+     */
+    public static function collectionsViewers(): array
+    {
+        return [
+            self::LenderAdmin->value,
+            self::CollectionsOfficer->value,
+            self::FinanceOfficer->value,
+        ];
+    }
+
+    public static function collectionsViewersPipe(): string
+    {
+        return implode('|', self::collectionsViewers());
+    }
+}===== routes\web.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use App\Enums\UserRole;
+use App\Http\Controllers\Auth\LoginController;
+use App\Http\Controllers\Auth\RegisterController;
+use App\Http\Controllers\Borrower\ApplicationController;
+use App\Http\Controllers\Borrower\PaymentController;
+use App\Http\Controllers\Borrower\PortalController;
+use App\Http\Controllers\Borrower\RestructuringController;
+use App\Http\Controllers\ContractVerificationController;
+use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\Lender\CollectionsWorkbenchController;
+use App\Http\Controllers\Lender\MakerCheckerController;
+use Illuminate\Support\Facades\Route;
+use Spatie\Permission\Middleware\RoleMiddleware;
+
+Route::get('/verify/contract/{code}', [ContractVerificationController::class, 'verify'])->name('contract.verify');
+
+Route::get('/', function () {
+    return view('welcome');
+});
+
+Route::middleware('guest')->group(function () {
+    Route::get('/login', [LoginController::class, 'create'])->name('login');
+    Route::post('/login', [LoginController::class, 'store'])->middleware('throttle:5,1')->name('login.store');
+
+    Route::get('/register', [RegisterController::class, 'create'])->name('register');
+    Route::post('/register', [RegisterController::class, 'store'])->middleware('throttle:5,1')->name('register.store');
+});
+
+Route::post('/logout', [LoginController::class, 'destroy'])->middleware('auth')->name('logout');
+
+Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::staffPipe()])
+    ->prefix('lender')
+    ->name('lender.')
+    ->group(function () {
+        Route::get('/dashboard', [DashboardController::class, 'lender'])->name('dashboard');
+
+        // Dual-control review desk: approvers only (lender_admin, finance_officer).
+        Route::middleware(RoleMiddleware::class . ':' . UserRole::approversPipe())
+            ->prefix('maker-checker')
+            ->name('maker-checker.')
+            ->group(function () {
+                Route::get('/', [MakerCheckerController::class, 'index'])->name('index');
+                Route::post('/{makerCheckerRequest}/approve', [MakerCheckerController::class, 'approve'])->name('approve');
+                Route::post('/{makerCheckerRequest}/reject', [MakerCheckerController::class, 'reject'])->name('reject');
+            });
+
+        // Collections and in-duplum workbench: read-only (GET only, by design).
+        Route::middleware(RoleMiddleware::class . ':' . UserRole::collectionsViewersPipe())
+            ->prefix('collections')
+            ->name('collections.')
+            ->group(function () {
+                Route::get('/', [CollectionsWorkbenchController::class, 'index'])->name('index');
+            });
+    });
+
+Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::Borrower->value])
+    ->prefix('borrower')
+    ->name('borrower.')
+    ->group(function () {
+        Route::get('/dashboard', [PortalController::class, 'show'])->name('dashboard');
+        Route::get('/apply', [ApplicationController::class, 'create'])->name('apply.create');
+        Route::post('/apply', [ApplicationController::class, 'store'])->middleware('throttle:5,1')->name('apply.store');
+        Route::post('/loans/{loan}/restructuring', [RestructuringController::class, 'accept'])->name('restructuring.accept');
+        Route::post('/loans/{loan}/pay', [PaymentController::class, 'store'])->middleware('throttle:6,1')->name('payment.store');
+    });===== resources\views\components\layouts\lender.blade.php ===== 
+@props(['title' => 'Dashboard'])
+@php
+    $user = auth()->user();
+    $roleLabel = \Illuminate\Support\Str::headline((string) $user->getRoleNames()->first());
+    $nav = [
+        ['label' => 'Dashboard', 'route' => 'lender.dashboard', 'roles' => null],
+        ['label' => 'Review desk', 'route' => 'lender.maker-checker.index', 'roles' => \App\Enums\UserRole::approvers()],
+        ['label' => 'Collections', 'route' => 'lender.collections.index', 'roles' => \App\Enums\UserRole::collectionsViewers()],
+    ];
+    $nav = array_values(array_filter(
+        $nav,
+        fn (array $item): bool => ($item['roles'] ?? null) === null || $user->hasAnyRole($item['roles'])
+    ));
+@endphp
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ $title }} | {{ config('app.name') }}</title>
+    @vite(['resources/css/app.css', 'resources/js/app.js'])
+</head>
+<body class="bg-paper font-sans text-ink antialiased" x-data="{ open: false }">
+    <div x-show="open" x-cloak x-on:click="open = false" class="fixed inset-0 z-20 bg-ink/50 lg:hidden"></div>
+
+    <aside class="fixed inset-y-0 left-0 z-30 flex w-64 flex-col bg-brand-900 text-brand-100 transition-transform duration-200 motion-reduce:transition-none lg:translate-x-0"
+           x-bind:class="open ? 'translate-x-0' : '-translate-x-full'">
+        <div class="px-6 py-5 text-lg font-semibold text-white">{{ config('app.name') }}</div>
+
+        <nav class="flex-1 space-y-1 px-3" aria-label="Main">
+            @foreach ($nav as $item)
+                <a href="{{ route($item['route']) }}"
+                   @if (request()->routeIs($item['route'])) aria-current="page" @endif
+                   @class([
+                       'flex items-center rounded-md px-3 py-2 text-sm font-medium',
+                       'bg-white/10 text-white' => request()->routeIs($item['route']),
+                       'hover:bg-white/5' => ! request()->routeIs($item['route']),
+                   ])>{{ $item['label'] }}</a>
+            @endforeach
+        </nav>
+
+        <div class="border-t border-white/10 px-6 py-4">
+            <p class="truncate text-sm font-medium text-white">{{ $user->name }}</p>
+            <p class="text-xs">{{ $roleLabel }}</p>
+            <form method="POST" action="{{ route('logout') }}" class="mt-3">
+                @csrf
+                <button type="submit" class="text-sm underline-offset-4 hover:text-white hover:underline">Sign out</button>
+            </form>
+        </div>
+    </aside>
+
+    <div class="lg:pl-64">
+        <header class="sticky top-0 z-10 flex h-14 items-center gap-3 border-b border-line bg-paper/90 px-4 backdrop-blur sm:px-8">
+            <button type="button" class="-ml-1 rounded-md p-2 lg:hidden" x-on:click="open = true" aria-label="Open menu">
+                <svg class="h-5 w-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14"/></svg>
+            </button>
+            <h1 class="text-base font-semibold">{{ $title }}</h1>
+        </header>
+
+        <main class="px-4 py-6 sm:px-8">
+            {{ $slot }}
+        </main>
+    </div>
+</body>
+</html>===== app\Models\LoanApplication.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+
+final class LoanApplication extends Model
+{
+    protected $fillable = [
+        'application_number',
+        'borrower_id',
+        'loan_product_id',
+        'requested_principal',
+        'requested_tenure_days',
+        'status',
+        'underwriter_id',
+        'rejection_reason',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'requested_principal' => 'decimal:2',
+        ];
+    }
+
+    public function borrower(): BelongsTo
+    {
+        return $this->belongsTo(Borrower::class, 'borrower_id');
+    }
+
+    public function product(): BelongsTo
+    {
+        return $this->belongsTo(LoanProduct::class, 'loan_product_id');
+    }
+
+    public function underwriter(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'underwriter_id');
+    }
+
+    public function ruleEvaluations(): HasMany
+    {
+        return $this->hasMany(CreditRuleEvaluation::class, 'loan_application_id');
+    }
+
+    public function loan(): HasOne
+    {
+        return $this->hasOne(Loan::class, 'loan_application_id');
+    }
+}===== app\Models\BorrowerFinancialProfile.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+final class BorrowerFinancialProfile extends Model
+{
+    protected $fillable = [
+        'borrower_id',
+        'monthly_income',
+        'monthly_expenses',
+        'mpesa_average_monthly_inflow',
+        'existing_debt_obligations',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'monthly_income'               => 'decimal:2',
+            'monthly_expenses'              => 'decimal:2',
+            'mpesa_average_monthly_inflow' => 'decimal:2',
+            'existing_debt_obligations'    => 'decimal:2',
+        ];
+    }
+
+    public function borrower(): BelongsTo
+    {
+        return $this->belongsTo(Borrower::class, 'borrower_id');
+    }
+}===== app\Models\AuditTrail.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+final class AuditTrail extends Model
+{
+    public $timestamps = false;
+
+    protected $fillable = [
+        'user_id',
+        'action',
+        'auditable_type',
+        'auditable_id',
+        'old_values',
+        'new_values',
+        'ip_address',
+        'user_agent',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'old_values' => 'array',
+            'new_values' => 'array',
+            'created_at' => 'datetime',
+        ];
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'user_id');
+    }
+}===== app\Services\Underwriting\CreditUnderwritingEngine.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Underwriting;
+
+use App\Enums\RiskBand;
+use App\Models\Borrower;
+use App\Models\BorrowerFinancialProfile;
+use App\Models\CrbInquiryRecord;
+use App\Models\CreditRuleEvaluation;
+use App\Models\LoanApplication;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+
+final class CreditUnderwritingEngine
+{
+    /**
+     * Evaluates a loan application against statutory and risk underwriting rules.
+     * Assigns risk bands, calculates credit limits, and records detailed rule logs.
+     *
+     * @param int $applicationId
+     * @return array Summary of underwriting decision and assigned terms
+     */
+    public function evaluateApplication(int $applicationId): array
+    {
+        return DB::transaction(function () use ($applicationId) {
+            /** @var LoanApplication $application */
+            $application = LoanApplication::where('id', $applicationId)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            /** @var Borrower $borrower */
+            $borrower = Borrower::where('id', $application->borrower_id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            /** @var BorrowerFinancialProfile|null $profile */
+            $profile = BorrowerFinancialProfile::where('borrower_id', $borrower->id)->first();
+
+            /** @var CrbInquiryRecord|null $latestCrb */
+            $latestCrb = CrbInquiryRecord::where('borrower_id', $borrower->id)
+                ->orderByDesc('id')
+                ->first();
+
+            $passedCount = 0;
+            $failedCount = 0;
+
+            // 1. Hard Rule: Borrower Blacklist Inspection
+            $isBlacklisted = $borrower->is_blacklisted;
+            $this->recordRuleEvaluation(
+                $application->id,
+                'RULE_01_BLACKLIST_CHECK',
+                'Borrower Fraud & Blacklist Inspection',
+                ! $isBlacklisted ? 'PASSED' : 'FAILED',
+                $isBlacklisted ? 'Blacklisted' : 'Clean',
+                'Clean'
+            );
+            $isBlacklisted ? $failedCount++ : $passedCount++;
+
+            // 2. Hard Rule: CRB Defaulted Accounts Audit
+            $defaultedAccounts = $latestCrb ? $latestCrb->defaulted_accounts_count : 0;
+            $crbPassed = $defaultedAccounts === 0;
+            $this->recordRuleEvaluation(
+                $application->id,
+                'RULE_02_CRB_DEFAULTS',
+                'CRB Active NPL/Defaulted Accounts Check',
+                $crbPassed ? 'PASSED' : 'FAILED',
+                (string) $defaultedAccounts,
+                '0'
+            );
+            $crbPassed ? $passedCount++ : $failedCount++;
+
+            // 3. Hard Rule: Debt-To-Income (DTI) Ratio Guard (Max 50.00%)
+            $monthlyIncome = $profile ? (string) $profile->monthly_income : '0.00';
+            $monthlyExpenses = $profile ? (string) $profile->monthly_expenses : '0.00';
+            $existingDebts = $profile ? (string) $profile->existing_debt_obligations : '0.00';
+
+            $totalObligations = bcadd($monthlyExpenses, $existingDebts, 2);
+            $dtiRatio = bccomp($monthlyIncome, '0.00', 2) > 0
+                ? bcdiv($totalObligations, $monthlyIncome, 4)
+                : '1.0000';
+
+            $dtiPassed = bccomp($dtiRatio, '0.5000', 4) <= 0;
+            $dtiPercentage = bcmul($dtiRatio, '100', 2).'%';
+
+            $this->recordRuleEvaluation(
+                $application->id,
+                'RULE_03_DTI_RATIO',
+                'Debt-To-Income Ratio Below 50%',
+                $dtiPassed ? 'PASSED' : 'FAILED',
+                $dtiPercentage,
+                '<= 50.00%'
+            );
+            $dtiPassed ? $passedCount++ : $failedCount++;
+
+            // 4. Hard Rule: M-Pesa Cash Flow Capacity Test (Min 1.5x Requested Principal)
+            $mpesaInflow = $profile ? (string) $profile->mpesa_average_monthly_inflow : '0.00';
+            $requestedPrincipal = (string) $application->requested_principal;
+
+            $requiredInflow = bcmul($requestedPrincipal, '1.50', 2);
+            $inflowPassed = bccomp($mpesaInflow, $requiredInflow, 2) >= 0;
+
+            $this->recordRuleEvaluation(
+                $application->id,
+                'RULE_04_MPESA_INFLOW_CAPACITY',
+                'M-Pesa Average Monthly Inflow Capacity',
+                $inflowPassed ? 'PASSED' : 'FAILED',
+                "KES {$mpesaInflow}",
+                ">= KES {$requiredInflow}"
+            );
+            $inflowPassed ? $passedCount++ : $failedCount++;
+
+            // Decision Matrix & Term Assignment
+            if ($failedCount > 0) {
+                $status = 'rejected';
+                $riskBand = RiskBand::D;
+                $approvedLimit = '0.00';
+                $rejectionReason = "Failed {$failedCount} underwriting risk evaluation rules.";
+            } else {
+                $status = 'approved_pending_checker';
+                $rejectionReason = null;
+
+                // Score-Based Risk Band Assignment
+                $crbScore = $latestCrb ? $latestCrb->credit_score : 600;
+
+                if ($crbScore >= 750) {
+                    $riskBand = RiskBand::A;
+                    $approvedLimit = bcmul($requestedPrincipal, '1.25', 2);
+                } elseif ($crbScore >= 650) {
+                    $riskBand = RiskBand::B;
+                    $approvedLimit = $requestedPrincipal;
+                } else {
+                    $riskBand = RiskBand::C;
+                    $approvedLimit = bcmul($requestedPrincipal, '0.75', 2);
+                }
+            }
+
+            // Update Application state
+            $application->update([
+                'status' => $status,
+                'rejection_reason' => $rejectionReason,
+            ]);
+
+            // Update Borrower risk profile and credit limit
+            $borrower->update([
+                'risk_band' => $riskBand,
+                'credit_limit' => $approvedLimit,
+            ]);
+
+            Log::channel('fintech')->info("Underwriting complete for Application #{$application->id}: Status = {$status}, Risk Band = {$riskBand->value}, Approved Limit = KES {$approvedLimit}");
+
+            return [
+                'application_id' => $application->id,
+                'status' => $status,
+                'risk_band' => $riskBand->value,
+                'approved_limit' => $approvedLimit,
+                'rules_passed' => $passedCount,
+                'rules_failed' => $failedCount,
+            ];
+        });
+    }
+
+    private function recordRuleEvaluation(
+        int $applicationId,
+        string $identifier,
+        string $description,
+        string $status,
+        string $actualValue,
+        string $thresholdValue
+    ): void {
+        CreditRuleEvaluation::create([
+            'loan_application_id' => $applicationId,
+            'rule_identifier' => $identifier,
+            'rule_description' => $description,
+            'status' => $status,
+            'actual_value' => $actualValue,
+            'threshold_value' => $thresholdValue,
+        ]);
+    }
+}===== app\Http\Controllers\Borrower\ApplicationController.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Controllers\Borrower;
+
+use App\Http\Controllers\Controller;
+use App\Http\Requests\StoreLoanApplicationRequest;
+use App\Models\AuditTrail;
+use App\Models\Borrower;
+use App\Models\LoanApplication;
+use App\Models\LoanProduct;
+use App\Services\Customer\BorrowerPortalService;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
+
+final class ApplicationController extends Controller
+{
+    /** Statuses that mean "still being processed". */
+    public const OPEN_STATUSES = ['submitted', 'pending', 'approved_pending_checker', 'approved'];
+
+    public function __construct(private readonly BorrowerPortalService $portal) {}
+
+    public function create(): \Illuminate\Contracts\View\View|RedirectResponse
+    {
+        $borrower = auth()->user()->borrower;
+
+        if (! $borrower instanceof Borrower) {
+            return redirect()->route('borrower.dashboard');
+        }
+
+        $latest = LoanApplication::query()
+            ->where('borrower_id', $borrower->id)
+            ->latest('id')
+            ->first();
+
+        return view('borrower.apply', [
+            'borrower' => $borrower,
+            'products' => LoanProduct::query()
+                ->where('is_active', true)
+                ->with(['interestRules', 'feeMatrices'])
+                ->orderBy('min_principal')
+                ->get(),
+            'openApplication' => $latest !== null && in_array($latest->status, self::OPEN_STATUSES, true) ? $latest : null,
+            'lastRejected' => $latest !== null && $latest->status === 'rejected' ? $latest : null,
+            'hasActiveLoan' => $this->portal->currentLoan($borrower) !== null,
+        ]);
+    }
+
+    public function store(StoreLoanApplicationRequest $request): RedirectResponse
+    {
+        $borrower = auth()->user()->borrower;
+
+        if (! $borrower instanceof Borrower) {
+            return redirect()->route('borrower.dashboard');
+        }
+
+        $product = LoanProduct::query()
+            ->where('id', $request->integer('loan_product_id'))
+            ->where('is_active', true)
+            ->first();
+
+        if ($product === null) {
+            throw ValidationException::withMessages(['loan_product_id' => 'That loan product is not available.']);
+        }
+
+        $amount = bcadd((string) $request->validated('amount'), '0', 2);
+
+        if (bccomp($amount, (string) $product->min_principal, 2) < 0 || bccomp($amount, (string) $product->max_principal, 2) > 0) {
+            throw ValidationException::withMessages([
+                'amount' => sprintf(
+                    'For %s, choose between KES %s and KES %s.',
+                    $product->name,
+                    number_format((float) $product->min_principal, 0),
+                    number_format((float) $product->max_principal, 0)
+                ),
+            ]);
+        }
+
+        DB::transaction(function () use ($borrower, $product, $amount, $request): void {
+            // Lock the borrower row so a double tap cannot create two applications.
+            Borrower::query()->where('id', $borrower->id)->lockForUpdate()->firstOrFail();
+
+            $open = LoanApplication::query()
+                ->where('borrower_id', $borrower->id)
+                ->whereIn('status', self::OPEN_STATUSES)
+                ->exists();
+
+            if ($open) {
+                throw ValidationException::withMessages(['amount' => 'You already have an application in progress.']);
+            }
+
+            if ($this->portal->currentLoan($borrower) !== null) {
+                throw ValidationException::withMessages(['amount' => 'Please finish repaying your current loan before applying again.']);
+            }
+
+            $application = LoanApplication::create([
+                'application_number' => 'APP-' . now()->format('ymd') . '-' . strtoupper(Str::random(6)),
+                'borrower_id' => $borrower->id,
+                'loan_product_id' => $product->id,
+                'requested_principal' => $amount,
+                'requested_tenure_days' => (int) $product->default_tenure_days,
+                'status' => 'pending',
+            ]);
+
+            AuditTrail::create([
+                'user_id' => auth()->id(),
+                'action' => 'LOAN_APPLICATION_SUBMITTED',
+                'auditable_type' => LoanApplication::class,
+                'auditable_id' => $application->id,
+                'old_values' => null,
+                'new_values' => [
+                    'product' => $product->product_code,
+                    'amount' => $amount,
+                    'tenure_days' => (int) $product->default_tenure_days,
+                ],
+                'ip_address' => substr((string) ($request->ip() ?? '127.0.0.1'), 0, 45),
+                'user_agent' => substr((string) ($request->userAgent() ?? 'unknown'), 0, 255),
+            ]);
+        });
+
+        return redirect()->route('borrower.apply.create')
+            ->with('status', 'Application received. We will review it and update you here.');
+    }
+}===== tests\TestCase.php ===== 
+<?php
+
+namespace Tests;
+
+use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
+
+abstract class TestCase extends BaseTestCase
+{
+    //
+}

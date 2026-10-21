@@ -1,0 +1,457 @@
+===== app\Http\Controllers\Borrower\ApplicationController.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Controllers\Borrower;
+
+use App\Enums\StatementReviewStatus;
+use App\Http\Controllers\Controller;
+use App\Http\Requests\StoreLoanApplicationRequest;
+use App\Models\AuditTrail;
+use App\Models\Borrower;
+use App\Models\LoanApplication;
+use App\Models\LoanProduct;
+use App\Models\MpesaStatementUpload;
+use App\Services\Customer\BorrowerPortalService;
+use App\Services\Underwriting\ApplicationReviewService;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
+
+final class ApplicationController extends Controller
+{
+    /** Statuses that mean "still being processed". */
+    public const OPEN_STATUSES = ['submitted', 'pending', 'approved_pending_checker', 'approved'];
+
+    public function __construct(private readonly BorrowerPortalService $portal) {}
+
+    public function create(): \Illuminate\Contracts\View\View|RedirectResponse
+    {
+        $borrower = auth()->user()->borrower;
+
+        if (! $borrower instanceof Borrower) {
+            return redirect()->route('borrower.dashboard');
+        }
+
+        $latest = LoanApplication::query()
+            ->where('borrower_id', $borrower->id)
+            ->latest('id')
+            ->first();
+
+        $openApplication = $latest !== null && in_array($latest->status, self::OPEN_STATUSES, true) ? $latest : null;
+
+        $statement = $openApplication !== null
+            ? MpesaStatementUpload::query()
+                ->where('loan_application_id', $openApplication->id)
+                ->latest('id')
+                ->first()
+            : null;
+
+        $canUploadStatement = $openApplication !== null
+            && in_array($openApplication->status, ApplicationReviewService::CHECKABLE_STATUSES, true)
+            && ($statement === null || $statement->review_status !== StatementReviewStatus::Accepted);
+
+        return view('borrower.apply', [
+            'borrower' => $borrower,
+            'products' => LoanProduct::query()
+                ->where('is_active', true)
+                ->with(['interestRules', 'feeMatrices'])
+                ->orderBy('min_principal')
+                ->get(),
+            'openApplication' => $openApplication,
+            'statement' => $statement,
+            'canUploadStatement' => $canUploadStatement,
+            'lastRejected' => $latest !== null && $latest->status === 'rejected' ? $latest : null,
+            'hasActiveLoan' => $this->portal->currentLoan($borrower) !== null,
+        ]);
+    }
+
+    public function store(StoreLoanApplicationRequest $request): RedirectResponse
+    {
+        $borrower = auth()->user()->borrower;
+
+        if (! $borrower instanceof Borrower) {
+            return redirect()->route('borrower.dashboard');
+        }
+
+        $product = LoanProduct::query()
+            ->where('id', $request->integer('loan_product_id'))
+            ->where('is_active', true)
+            ->first();
+
+        if ($product === null) {
+            throw ValidationException::withMessages(['loan_product_id' => 'That loan product is not available.']);
+        }
+
+        $amount = bcadd((string) $request->validated('amount'), '0', 2);
+
+        if (bccomp($amount, (string) $product->min_principal, 2) < 0 || bccomp($amount, (string) $product->max_principal, 2) > 0) {
+            throw ValidationException::withMessages([
+                'amount' => sprintf(
+                    'For %s, choose between KES %s and KES %s.',
+                    $product->name,
+                    number_format((float) $product->min_principal, 0),
+                    number_format((float) $product->max_principal, 0)
+                ),
+            ]);
+        }
+
+        DB::transaction(function () use ($borrower, $product, $amount, $request): void {
+            // Lock the borrower row so a double tap cannot create two applications.
+            Borrower::query()->where('id', $borrower->id)->lockForUpdate()->firstOrFail();
+
+            $open = LoanApplication::query()
+                ->where('borrower_id', $borrower->id)
+                ->whereIn('status', self::OPEN_STATUSES)
+                ->exists();
+
+            if ($open) {
+                throw ValidationException::withMessages(['amount' => 'You already have an application in progress.']);
+            }
+
+            if ($this->portal->currentLoan($borrower) !== null) {
+                throw ValidationException::withMessages(['amount' => 'Please finish repaying your current loan before applying again.']);
+            }
+
+            $application = LoanApplication::create([
+                'application_number' => 'APP-' . now()->format('ymd') . '-' . strtoupper(Str::random(6)),
+                'borrower_id' => $borrower->id,
+                'loan_product_id' => $product->id,
+                'requested_principal' => $amount,
+                'requested_tenure_days' => (int) $product->default_tenure_days,
+                'status' => 'pending',
+            ]);
+
+            AuditTrail::create([
+                'user_id' => auth()->id(),
+                'action' => 'LOAN_APPLICATION_SUBMITTED',
+                'auditable_type' => LoanApplication::class,
+                'auditable_id' => $application->id,
+                'old_values' => null,
+                'new_values' => [
+                    'product' => $product->product_code,
+                    'amount' => $amount,
+                    'tenure_days' => (int) $product->default_tenure_days,
+                ],
+                'ip_address' => substr((string) ($request->ip() ?? '127.0.0.1'), 0, 45),
+                'user_agent' => substr((string) ($request->userAgent() ?? 'unknown'), 0, 255),
+            ]);
+        });
+
+        return redirect()->route('borrower.apply.create')
+            ->with('status', 'Application received. We will review it and update you here.');
+    }
+}===== resources\views\borrower\apply.blade.php ===== 
+@php
+    $money = fn (string $v): string => 'KES ' . number_format((float) $v, 0);
+    $statusText = [
+        'submitted' => 'Received',
+        'pending' => 'Waiting for review',
+        'approved_pending_checker' => 'Checks passed, waiting for final approval',
+        'approved' => 'Approved, waiting for payout',
+    ];
+    $statementTone = fn ($s): string => match ($s?->value) {
+        'accepted' => 'success',
+        'rejected' => 'danger',
+        default => 'warning',
+    };
+@endphp
+<x-layouts.borrower title="Apply">
+    <h1 class="text-xl font-semibold">Apply for a loan</h1>
+
+    @if (session('status'))
+        <div class="mt-4 rounded-lg border border-brand-500 bg-brand-50 px-4 py-3 text-sm text-brand-900" role="status">{{ session('status') }}</div>
+    @endif
+
+    @if ($openApplication)
+        <x-card title="Your application" class="mt-5">
+            <dl class="divide-y divide-line text-sm">
+                <div class="flex justify-between py-2"><dt class="text-muted">Reference</dt><dd>{{ $openApplication->application_number }}</dd></div>
+                <div class="flex justify-between py-2"><dt class="text-muted">Amount</dt><dd class="tabular-nums">{{ $money((string) $openApplication->requested_principal) }}</dd></div>
+                <div class="flex justify-between py-2"><dt class="text-muted">Status</dt><dd>{{ $statusText[$openApplication->status] ?? 'In progress' }}</dd></div>
+            </dl>
+        </x-card>
+
+        <x-card title="Your M-Pesa statement" class="mt-5">
+            @if ($statement)
+                <dl class="divide-y divide-line text-sm">
+                    <div class="flex items-center justify-between py-2">
+                        <dt class="text-muted">Status</dt>
+                        <dd><x-badge tone="{{ $statementTone($statement->review_status) }}">{{ $statement->review_status->borrowerLabel() }}</x-badge></dd>
+                    </div>
+                    <div class="flex justify-between py-2">
+                        <dt class="text-muted">Uploaded</dt>
+                        <dd class="tabular-nums">{{ $statement->created_at?->timezone('Africa/Nairobi')->format('d M Y, H:i') }}</dd>
+                    </div>
+                    @if ($statement->valid_until)
+                        <div class="flex justify-between py-2">
+                            <dt class="text-muted">Valid until</dt>
+                            <dd class="tabular-nums">{{ $statement->valid_until->format('d M Y') }}</dd>
+                        </div>
+                    @endif
+                </dl>
+
+                @if ($statement->review_status->value === 'rejected' && $statement->review_notes)
+                    <p class="mt-3 rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-800" role="alert">{{ $statement->review_notes }}</p>
+                @endif
+            @else
+                <p class="text-sm text-muted">
+                    To assess your application we need your M-Pesa statement for the last 3 months.
+                    Request a full statement from Safaricom and upload the PDF exactly as it was sent to you.
+                    Please do not edit, screenshot or re-save it: altered statements are not accepted.
+                </p>
+            @endif
+
+            @if ($canUploadStatement)
+                <form method="POST"
+                      action="{{ route('borrower.statement.store', ['loanApplication' => $openApplication->id]) }}"
+                      enctype="multipart/form-data"
+                      class="mt-4 space-y-3 border-t border-line pt-4">
+                    @csrf
+
+                    <div>
+                        <label for="statement" class="block text-sm font-medium">{{ $statement ? 'Upload a new statement (PDF)' : 'Statement (PDF, up to 5 MB)' }}</label>
+                        <input id="statement" name="statement" type="file" accept="application/pdf,.pdf"
+                               class="mt-1 block w-full text-sm">
+                        @error('statement') <p class="mt-1 text-sm text-rose-700" role="alert">{{ $message }}</p> @enderror
+                    </div>
+
+                    <div>
+                        <label for="statement_password" class="block text-sm font-medium">Statement password (if it has one)</label>
+                        <input id="statement_password" name="statement_password" type="password" autocomplete="off"
+                               class="mt-1 w-full rounded-md border border-line bg-white px-3 py-2 text-base focus:border-brand-600 focus:outline-none">
+                        <p class="mt-1 text-xs text-muted">Kept encrypted, used only by the credit officer to open your file, and erased once your statement has been checked.</p>
+                        @error('statement_password') <p class="mt-1 text-sm text-rose-700" role="alert">{{ $message }}</p> @enderror
+                    </div>
+
+                    <div>
+                        <label class="flex items-start gap-2 text-sm">
+                            <input type="checkbox" name="consent" value="1" class="mt-1 accent-brand-700" @checked(old('consent'))>
+                            <span>I agree that this lender may read my M-Pesa statement to assess my loan application. I understand it is handled under the Data Protection Act, 2019.</span>
+                        </label>
+                        @error('consent') <p class="mt-1 text-sm text-rose-700" role="alert">{{ $message }}</p> @enderror
+                    </div>
+
+                    <x-button type="submit" class="w-full">Upload statement</x-button>
+                </form>
+            @endif
+        </x-card>
+    @elseif ($hasActiveLoan)
+        <x-card class="mt-5">
+            <p class="text-sm text-muted">You have a loan that is not fully repaid yet. You can apply again once it is settled.</p>
+        </x-card>
+    @else
+        @if ($lastRejected)
+            <div class="mt-4 rounded-lg border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-800" role="alert">
+                Your last application was not approved{{ $lastRejected->rejection_reason ? ': ' . $lastRejected->rejection_reason : '.' }}
+            </div>
+        @endif
+
+        @if ($products->isEmpty())
+            <x-card class="mt-5">
+                <p class="text-sm text-muted">No loan products are open right now. Please check back soon.</p>
+            </x-card>
+        @else
+            <form method="POST" action="{{ route('borrower.apply.store') }}" class="mt-5 space-y-4">
+                @csrf
+
+                @foreach ($products as $product)
+                    @php $rate = $product->interestRules->first(); @endphp
+                    <label class="block cursor-pointer">
+                        <x-card>
+                            <div class="flex items-start gap-3">
+                                <input type="radio" name="loan_product_id" value="{{ $product->id }}"
+                                       class="mt-1 accent-brand-700" @checked((int) old('loan_product_id', $products->first()->id) === $product->id)>
+                                <div class="flex-1">
+                                    <p class="font-semibold">{{ $product->name }}</p>
+                                    <p class="text-sm text-muted">{{ $money((string) $product->min_principal) }} to {{ $money((string) $product->max_principal) }} over {{ $product->default_tenure_days }} days</p>
+                                    <ul class="mt-2 space-y-1 text-sm">
+                                        @if ($rate)
+                                            <li>Interest: {{ rtrim(rtrim((string) $rate->annual_rate, '0'), '.') }}% a year</li>
+                                        @endif
+                                        @foreach ($product->feeMatrices as $fee)
+                                            <li>
+                                                {{ $fee->fee_name }}:
+                                                @if ((float) $fee->fee_percentage > 0)
+                                                    {{ rtrim(rtrim((string) $fee->fee_percentage, '0'), '.') }}% of the loan
+                                                @else
+                                                    {{ $money((string) $fee->fee_amount) }}
+                                                @endif
+                                                @if ($fee->is_excise_duty_applicable)
+                                                    <span class="text-muted">(includes 20% excise duty paid to KRA)</span>
+                                                @endif
+                                            </li>
+                                        @endforeach
+                                    </ul>
+                                </div>
+                            </div>
+                        </x-card>
+                    </label>
+                @endforeach
+                @error('loan_product_id') <p class="text-sm text-rose-700" role="alert">{{ $message }}</p> @enderror
+
+                <div>
+                    <label for="amount" class="block text-sm font-medium">How much do you need? (KES)</label>
+                    <input id="amount" name="amount" type="text" inputmode="numeric" autocomplete="off"
+                           value="{{ old('amount') }}"
+                           class="mt-1 w-full rounded-md border border-line bg-white px-3 py-2 text-base tabular-nums focus:border-brand-600 focus:outline-none">
+                    @error('amount') <p class="mt-1 text-sm text-rose-700" role="alert">{{ $message }}</p> @enderror
+                </div>
+
+                <x-button type="submit" class="w-full">Send application</x-button>
+                <p class="text-xs text-muted">We check your details before any decision. Applying does not commit you to take the loan.</p>
+            </form>
+        @endif
+    @endif
+</x-layouts.borrower>===== app\Models\MpesaStatementUpload.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use App\Enums\StatementReviewStatus;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+final class MpesaStatementUpload extends Model
+{
+    protected $fillable = [
+        'borrower_id',
+        'loan_application_id',
+        'file_path',
+        'original_name',
+        'file_size',
+        'file_sha256',
+        'pdf_password_hash',
+        'pdf_password_encrypted',
+        'parsing_status',
+        'total_inflows_detected',
+        'total_outflows_detected',
+        'gambling_transaction_count',
+        'fuliza_deduction_count',
+        'parsed_at',
+        'review_status',
+        'reviewed_by_user_id',
+        'reviewed_at',
+        'review_notes',
+        'flags',
+        'valid_until',
+    ];
+
+    /** @var list<string> */
+    protected $hidden = [
+        'pdf_password_hash',
+        'pdf_password_encrypted',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'total_inflows_detected'  => 'decimal:2',
+            'total_outflows_detected' => 'decimal:2',
+            'parsed_at'               => 'datetime',
+            'review_status'           => StatementReviewStatus::class,
+            'reviewed_at'             => 'datetime',
+            'flags'                   => 'array',
+            'valid_until'             => 'date',
+            'file_size'               => 'integer',
+        ];
+    }
+
+    public function borrower(): BelongsTo
+    {
+        return $this->belongsTo(Borrower::class, 'borrower_id');
+    }
+
+    public function application(): BelongsTo
+    {
+        return $this->belongsTo(LoanApplication::class, 'loan_application_id');
+    }
+
+    public function reviewer(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'reviewed_by_user_id');
+    }
+}===== app\Models\LoanApplication.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+
+final class LoanApplication extends Model
+{
+    protected $fillable = [
+        'application_number',
+        'borrower_id',
+        'loan_product_id',
+        'requested_principal',
+        'requested_tenure_days',
+        'status',
+        'underwriter_id',
+        'rejection_reason',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'requested_principal' => 'decimal:2',
+        ];
+    }
+
+    public function borrower(): BelongsTo
+    {
+        return $this->belongsTo(Borrower::class, 'borrower_id');
+    }
+
+    public function product(): BelongsTo
+    {
+        return $this->belongsTo(LoanProduct::class, 'loan_product_id');
+    }
+
+    public function underwriter(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'underwriter_id');
+    }
+
+    public function ruleEvaluations(): HasMany
+    {
+        return $this->hasMany(CreditRuleEvaluation::class, 'loan_application_id');
+    }
+
+    public function loan(): HasOne
+    {
+        return $this->hasOne(Loan::class, 'loan_application_id');
+    }
+}===== app\Enums\StatementReviewStatus.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Enums;
+
+enum StatementReviewStatus: string
+{
+    case AwaitingReview = 'awaiting_review';
+    case Accepted = 'accepted';
+    case Rejected = 'rejected';
+    case Superseded = 'superseded';
+
+    public function borrowerLabel(): string
+    {
+        return match ($this) {
+            self::AwaitingReview => 'Being checked',
+            self::Accepted => 'Accepted',
+            self::Rejected => 'Please upload again',
+            self::Superseded => 'Replaced by a newer upload',
+        };
+    }
+}

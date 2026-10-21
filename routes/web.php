@@ -9,10 +9,13 @@ use App\Http\Controllers\Borrower\ApplicationController;
 use App\Http\Controllers\Borrower\PaymentController;
 use App\Http\Controllers\Borrower\PortalController;
 use App\Http\Controllers\Borrower\RestructuringController;
+use App\Http\Controllers\Borrower\StatementController;
 use App\Http\Controllers\ContractVerificationController;
 use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\Lender\ApplicationQueueController;
 use App\Http\Controllers\Lender\CollectionsWorkbenchController;
 use App\Http\Controllers\Lender\MakerCheckerController;
+use App\Http\Controllers\Lender\StatementReviewController;
 use Illuminate\Support\Facades\Route;
 use Spatie\Permission\Middleware\RoleMiddleware;
 
@@ -37,6 +40,28 @@ Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::staffPipe()])
     ->name('lender.')
     ->group(function () {
         Route::get('/dashboard', [DashboardController::class, 'lender'])->name('dashboard');
+
+        // Applications queue: credit officers and admins act, finance officers view only.
+        Route::middleware(RoleMiddleware::class . ':' . UserRole::applicationViewersPipe())
+            ->prefix('applications')
+            ->name('applications.')
+            ->group(function () {
+                Route::get('/', [ApplicationQueueController::class, 'index'])->name('index');
+                Route::get('/{loanApplication}', [ApplicationQueueController::class, 'show'])->name('show');
+            
+
+                Route::middleware(RoleMiddleware::class . ':' . UserRole::underwritersPipe())
+                    ->group(function () {
+                        Route::post('/{loanApplication}/inflow', [ApplicationQueueController::class, 'updateInflow'])->name('inflow');
+                        Route::post('/{loanApplication}/check', [ApplicationQueueController::class, 'runCheck'])->name('check');
+                        Route::post('/{loanApplication}/final-approval', [ApplicationQueueController::class, 'requestApproval'])->name('final-approval');
+                        // Statement evidence: documents are only for people who decide on them.
+                        Route::get('/statements/{mpesaStatementUpload}/file', [StatementReviewController::class, 'file'])->name('statements.file');
+                        Route::post('/statements/{mpesaStatementUpload}/password', [StatementReviewController::class, 'password'])->name('statements.password');
+                        Route::post('/statements/{mpesaStatementUpload}/accept', [StatementReviewController::class, 'accept'])->name('statements.accept');
+                        Route::post('/statements/{mpesaStatementUpload}/reject', [StatementReviewController::class, 'reject'])->name('statements.reject');
+                    });
+            });
 
         // Dual-control review desk: approvers only (lender_admin, finance_officer).
         Route::middleware(RoleMiddleware::class . ':' . UserRole::approversPipe())
@@ -64,6 +89,7 @@ Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::Borrower->val
         Route::get('/dashboard', [PortalController::class, 'show'])->name('dashboard');
         Route::get('/apply', [ApplicationController::class, 'create'])->name('apply.create');
         Route::post('/apply', [ApplicationController::class, 'store'])->middleware('throttle:5,1')->name('apply.store');
+        Route::post('/apply/{loanApplication}/statement', [StatementController::class, 'store'])->middleware('throttle:5,1')->name('statement.store');
         Route::post('/loans/{loan}/restructuring', [RestructuringController::class, 'accept'])->name('restructuring.accept');
         Route::post('/loans/{loan}/pay', [PaymentController::class, 'store'])->middleware('throttle:6,1')->name('payment.store');
     });

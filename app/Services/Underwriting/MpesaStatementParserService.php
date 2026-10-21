@@ -44,7 +44,12 @@ final class MpesaStatementParserService
             $filePath = Storage::disk('local')->path($upload->file_path);
 
             if (! file_exists($filePath)) {
-                // If file is missing, generate deterministic mock fallback parsing for testing
+                // The deterministic mock is for automated tests only. Outside the
+                // testing environment a missing file must never invent income.
+                if (! app()->environment('testing')) {
+                    throw new RuntimeException('The statement file is missing from storage.');
+                }
+
                 return $this->processMockParsing($upload);
             }
 

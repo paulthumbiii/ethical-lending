@@ -1,0 +1,1323 @@
+===== app\Services\Governance\MakerCheckerService.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Governance;
+
+use App\Models\AuditTrail;
+use App\Models\LoanApplication;
+use App\Models\MakerCheckerRequest;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use RuntimeException;
+
+final class MakerCheckerService
+{
+    /**
+     * Creates a pending dual-control authorization request.
+     *
+     * @param int $makerUserId
+     * @string $actionType (e.g., 'APPROVE_LOAN_DISBURSEMENT', 'WAIVE_INTEREST')
+     * @string $targetEntityType
+     * @int $targetEntityId
+     * @array $payload
+     * @return MakerCheckerRequest
+     */
+    public function createPendingRequest(
+        int $makerUserId,
+        string $actionType,
+        string $targetEntityType,
+        int $targetEntityId,
+        array $payload = []
+    ): MakerCheckerRequest {
+        return MakerCheckerRequest::create([
+            'maker_user_id' => $makerUserId,
+            'action_type' => $actionType,
+            'target_entity_type' => $targetEntityType,
+            'target_entity_id' => $targetEntityId,
+            'payload' => $payload,
+            'status' => 'pending',
+        ]);
+    }
+
+    /**
+     * Authorizes and executes a pending request under strict non-self-approval enforcement.
+     *
+     * @param int $requestId
+     * @param int $checkerUserId
+     * @param string|null $checkerNotes
+     * @return array
+     * @throws RuntimeException
+     */
+    public function authorizeRequest(int $requestId, int $checkerUserId, ?string $checkerNotes = null): array
+    {
+        return DB::transaction(function () use ($requestId, $checkerUserId, $checkerNotes) {
+            /** @var MakerCheckerRequest $request */
+            $request = MakerCheckerRequest::where('id', $requestId)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            if ($request->status !== 'pending') {
+                throw new RuntimeException("Maker-Checker Request #{$requestId} is not in pending status.");
+            }
+
+            // Dual-Control Requirement: Checker MUST NOT be the Maker.
+            // Compared as integers so a driver that returns ids as strings cannot slip past the check.
+            if ((int) $request->maker_user_id === $checkerUserId) {
+                Log::channel('fintech')->warning("Dual-Control Violation Attempt: User #{$checkerUserId} attempted self-approval on Request #{$requestId}");
+                throw new RuntimeException("Dual-Control Violation: You cannot authorize a request you initiated.");
+            }
+
+            $request->update([
+                'status' => 'approved',
+                'checker_user_id' => $checkerUserId,
+                'checker_notes' => $checkerNotes,
+                'actioned_at' => now(),
+            ]);
+
+            // Execute specific state mutation based on action type
+            if ($request->action_type === 'APPROVE_LOAN_APPLICATION') {
+                /** @var LoanApplication|null $app */
+                $app = LoanApplication::where('id', $request->target_entity_id)->first();
+                if ($app) {
+                    $app->update(['status' => 'approved']);
+                }
+            }
+
+            // Record immutable Audit Trail
+            AuditTrail::create([
+                'user_id' => $checkerUserId,
+                'action' => 'MAKER_CHECKER_AUTHORIZED',
+                'auditable_type' => MakerCheckerRequest::class,
+                'auditable_id' => $request->id,
+                'old_values' => ['status' => 'pending'],
+                'new_values' => [
+                    'status' => 'approved',
+                    'action_type' => $request->action_type,
+                    'checker_user_id' => $checkerUserId,
+                ],
+                'ip_address' => request()->ip() ?? '127.0.0.1',
+                'user_agent' => request()->userAgent() ?? 'SYSTEM',
+            ]);
+
+            Log::channel('fintech')->info("Maker-Checker Request #{$requestId} [{$request->action_type}] authorized by Checker #{$checkerUserId}");
+
+            return [
+                'request_id' => $request->id,
+                'action_type' => $request->action_type,
+                'status' => 'approved',
+            ];
+        });
+    }
+
+    /**
+     * Rejects a pending dual-control request and records the decision on the audit trail.
+     */
+    public function rejectRequest(int $requestId, int $checkerUserId, string $reason): array
+    {
+        return DB::transaction(function () use ($requestId, $checkerUserId, $reason) {
+            /** @var MakerCheckerRequest $request */
+            $request = MakerCheckerRequest::where('id', $requestId)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            if ($request->status !== 'pending') {
+                throw new RuntimeException("Maker-Checker Request #{$requestId} is not in pending status.");
+            }
+
+            if ((int) $request->maker_user_id === $checkerUserId) {
+                Log::channel('fintech')->warning("Dual-Control Violation Attempt: User #{$checkerUserId} attempted to reject own Request #{$requestId}");
+                throw new RuntimeException("Dual-Control Violation: You cannot reject/action a request you initiated.");
+            }
+
+            $request->update([
+                'status' => 'rejected',
+                'checker_user_id' => $checkerUserId,
+                'checker_notes' => $reason,
+                'actioned_at' => now(),
+            ]);
+
+            AuditTrail::create([
+                'user_id' => $checkerUserId,
+                'action' => 'MAKER_CHECKER_REJECTED',
+                'auditable_type' => MakerCheckerRequest::class,
+                'auditable_id' => $request->id,
+                'old_values' => ['status' => 'pending'],
+                'new_values' => [
+                    'status' => 'rejected',
+                    'action_type' => $request->action_type,
+                    'checker_user_id' => $checkerUserId,
+                    'reason' => $reason,
+                ],
+                'ip_address' => request()->ip() ?? '127.0.0.1',
+                'user_agent' => request()->userAgent() ?? 'SYSTEM',
+            ]);
+
+            Log::channel('fintech')->info("Maker-Checker Request #{$requestId} [{$request->action_type}] rejected by Checker #{$checkerUserId}");
+
+            return [
+                'request_id' => $request->id,
+                'status' => 'rejected',
+            ];
+        });
+    }
+}===== app\Http\Controllers\Lender\MakerCheckerController.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Controllers\Lender;
+
+use App\Http\Controllers\Controller;
+use App\Http\Requests\ReviewMakerCheckerRequest;
+use App\Models\MakerCheckerRequest;
+use App\Services\Governance\MakerCheckerService;
+use Illuminate\Contracts\View\View;
+use Illuminate\Http\RedirectResponse;
+use RuntimeException;
+
+final class MakerCheckerController extends Controller
+{
+    public function __construct(private readonly MakerCheckerService $service)
+    {
+    }
+
+    public function index(): View
+    {
+        $pendingCount = MakerCheckerRequest::query()->where('status', 'pending')->count();
+
+        $pending = MakerCheckerRequest::query()
+            ->with('maker')
+            ->where('status', 'pending')
+            ->oldest('id')
+            ->limit(50)
+            ->get();
+
+        $recent = MakerCheckerRequest::query()
+            ->with(['maker', 'checker'])
+            ->whereIn('status', ['approved', 'rejected'])
+            ->latest('actioned_at')
+            ->limit(10)
+            ->get();
+
+        return view('lender.maker-checker.index', [
+            'pendingCount' => $pendingCount,
+            'pending'      => $pending,
+            'recent'       => $recent,
+        ]);
+    }
+
+    public function approve(
+        ReviewMakerCheckerRequest $request,
+        MakerCheckerRequest $makerCheckerRequest
+    ): RedirectResponse {
+        try {
+            $this->service->authorizeRequest(
+                $makerCheckerRequest->id,
+                (int) $request->user()->id,
+                $request->validated('notes')
+            );
+        } catch (RuntimeException $e) {
+            return back()->withErrors(['review' => $e->getMessage()]);
+        }
+
+        return back()->with('status', "Request #{$makerCheckerRequest->id} approved.");
+    }
+
+    public function reject(
+        ReviewMakerCheckerRequest $request,
+        MakerCheckerRequest $makerCheckerRequest
+    ): RedirectResponse {
+        try {
+            $this->service->rejectRequest(
+                $makerCheckerRequest->id,
+                (int) $request->user()->id,
+                (string) $request->validated('notes')
+            );
+        } catch (RuntimeException $e) {
+            return back()->withErrors(['review' => $e->getMessage()]);
+        }
+
+        return back()->with('status', "Request #{$makerCheckerRequest->id} rejected.");
+    }
+}===== app\Http\Controllers\Lender\ApplicationQueueController.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Controllers\Lender;
+
+use App\Enums\StatementReviewStatus;
+use App\Enums\UserRole;
+use App\Http\Controllers\Controller;
+use App\Http\Requests\UpdateApplicationInflowRequest;
+use App\Models\LoanApplication;
+use App\Models\MpesaStatementUpload;
+use App\Services\Underwriting\ApplicationReviewService;
+use Illuminate\Contracts\View\View;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use RuntimeException;
+
+final class ApplicationQueueController extends Controller
+{
+    public function __construct(private readonly ApplicationReviewService $service)
+    {
+    }
+
+    public function index(): View
+    {
+        $waitingCount = LoanApplication::query()
+            ->whereIn('status', ApplicationReviewService::CHECKABLE_STATUSES)
+            ->count();
+
+        $waiting = LoanApplication::query()
+            ->with(['borrower', 'product'])
+            ->whereIn('status', ApplicationReviewService::CHECKABLE_STATUSES)
+            ->oldest('id')
+            ->limit(100)
+            ->get();
+
+        $decided = LoanApplication::query()
+            ->with(['borrower', 'product'])
+            ->whereIn('status', ['approved_pending_checker', 'rejected', 'approved'])
+            ->latest('id')
+            ->limit(20)
+            ->get();
+
+        return view('lender.applications.index', [
+            'waitingCount' => $waitingCount,
+            'waiting' => $waiting,
+            'decided' => $decided,
+        ]);
+    }
+
+    public function show(LoanApplication $loanApplication): View
+    {
+        $loanApplication->load([
+            'borrower.financialProfile',
+            'product',
+            'underwriter',
+            'ruleEvaluations' => fn ($query) => $query->orderBy('id'),
+        ]);
+
+        $statements = MpesaStatementUpload::query()
+            ->with('reviewer')
+            ->where('loan_application_id', $loanApplication->id)
+            ->latest('id')
+            ->get();
+
+        $today = now()->toDateString();
+
+        $hasAcceptedStatement = $statements->contains(
+            fn (MpesaStatementUpload $s): bool => $s->review_status === StatementReviewStatus::Accepted
+                && $s->valid_until !== null
+                && $s->valid_until->toDateString() >= $today
+        );
+
+        $checkable = in_array($loanApplication->status, ApplicationReviewService::CHECKABLE_STATUSES, true);
+        $isUnderwriter = (bool) auth()->user()?->hasAnyRole(UserRole::underwriters());
+
+        return view('lender.applications.show', [
+            'application' => $loanApplication,
+            'statements' => $statements,
+            'hasAcceptedStatement' => $hasAcceptedStatement,
+            'isUnderwriter' => $isUnderwriter,
+            'checkable' => $checkable,
+            'canAct' => $checkable && $isUnderwriter,
+        ]);
+    }
+
+    public function updateInflow(
+        UpdateApplicationInflowRequest $request,
+        LoanApplication $loanApplication
+    ): RedirectResponse {
+        $target = redirect()->route('lender.applications.show', ['loanApplication' => $loanApplication->id]);
+
+        try {
+            $this->service->updateInflow(
+                $loanApplication->id,
+                (int) $request->user()->id,
+                (string) $request->validated('mpesa_average_monthly_inflow'),
+                (string) ($request->ip() ?? '127.0.0.1'),
+                (string) ($request->userAgent() ?? 'unknown')
+            );
+        } catch (RuntimeException $e) {
+            return $target->withErrors(['review' => $e->getMessage()]);
+        }
+
+        return $target->with('status', 'Verified M-Pesa inflow saved.');
+    }
+
+    public function runCheck(Request $request, LoanApplication $loanApplication): RedirectResponse
+    {
+        $target = redirect()->route('lender.applications.show', ['loanApplication' => $loanApplication->id]);
+
+        try {
+            $result = $this->service->runCheck(
+                $loanApplication->id,
+                (int) $request->user()->id,
+                (string) ($request->ip() ?? '127.0.0.1'),
+                (string) ($request->userAgent() ?? 'unknown')
+            );
+        } catch (RuntimeException $e) {
+            return $target->withErrors(['review' => $e->getMessage()]);
+        }
+
+        $message = $result['status'] === 'rejected'
+            ? 'Check complete: the application did not pass.'
+            : 'Check complete: passed. It now waits for a second approver.';
+
+        return $target->with('status', $message);
+    }
+}===== app\Services\Underwriting\ApplicationReviewService.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Underwriting;
+
+use App\Enums\StatementReviewStatus;
+use App\Models\AuditTrail;
+use App\Models\BorrowerFinancialProfile;
+use App\Models\CreditRuleEvaluation;
+use App\Models\LoanApplication;
+use App\Models\MpesaStatementUpload;
+use Illuminate\Support\Facades\DB;
+use RuntimeException;
+
+final class ApplicationReviewService
+{
+    /** Statuses that still wait for a credit check. */
+    public const CHECKABLE_STATUSES = ['submitted', 'pending'];
+
+    public function __construct(private readonly CreditUnderwritingEngine $engine)
+    {
+    }
+
+    /**
+     * Staff-verified M-Pesa average monthly inflow. Audited with old and new value.
+     */
+    public function updateInflow(
+        int $applicationId,
+        int $userId,
+        string $newInflow,
+        string $ip,
+        string $userAgent
+    ): void {
+        $newInflow = bcadd($newInflow, '0', 2);
+
+        DB::transaction(function () use ($applicationId, $userId, $newInflow, $ip, $userAgent): void {
+            $application = LoanApplication::query()
+                ->where('id', $applicationId)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $this->assertCheckable($application);
+
+            $profile = BorrowerFinancialProfile::query()
+                ->where('borrower_id', $application->borrower_id)
+                ->lockForUpdate()
+                ->first();
+
+            $old = $profile !== null
+                ? bcadd((string) $profile->mpesa_average_monthly_inflow, '0', 2)
+                : null;
+
+            if ($profile === null) {
+                BorrowerFinancialProfile::create([
+                    'borrower_id' => $application->borrower_id,
+                    'monthly_income' => '0.00',
+                    'monthly_expenses' => '0.00',
+                    'existing_debt_obligations' => '0.00',
+                    'mpesa_average_monthly_inflow' => $newInflow,
+                ]);
+            } else {
+                $profile->update(['mpesa_average_monthly_inflow' => $newInflow]);
+            }
+
+            AuditTrail::create([
+                'user_id' => $userId,
+                'action' => 'APPLICATION_INFLOW_UPDATED',
+                'auditable_type' => LoanApplication::class,
+                'auditable_id' => $application->id,
+                'old_values' => ['mpesa_average_monthly_inflow' => $old],
+                'new_values' => ['mpesa_average_monthly_inflow' => $newInflow],
+                'ip_address' => substr($ip, 0, 45),
+                'user_agent' => substr($userAgent, 0, 255),
+            ]);
+        });
+    }
+
+    /**
+     * Runs the underwriting engine once on a pending application,
+     * and only when an accepted, in-date statement backs it.
+     *
+     * @return array<string, mixed>
+     */
+    public function runCheck(int $applicationId, int $userId, string $ip, string $userAgent): array
+    {
+        return DB::transaction(function () use ($applicationId, $userId, $ip, $userAgent): array {
+            $application = LoanApplication::query()
+                ->where('id', $applicationId)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $this->assertCheckable($application);
+
+            $hasValidStatement = MpesaStatementUpload::query()
+                ->where('loan_application_id', $application->id)
+                ->where('review_status', StatementReviewStatus::Accepted->value)
+                ->whereDate('valid_until', '>=', now()->toDateString())
+                ->exists();
+
+            if (! $hasValidStatement) {
+                throw new RuntimeException('Accept a valid M-Pesa statement before running the credit check.');
+            }
+
+            $oldStatus = (string) $application->status;
+
+            // Page always shows the latest run only.
+            CreditRuleEvaluation::query()
+                ->where('loan_application_id', $application->id)
+                ->delete();
+
+            $result = $this->engine->evaluateApplication($application->id);
+
+            LoanApplication::query()
+                ->whereKey($application->id)
+                ->update(['underwriter_id' => $userId]);
+
+            AuditTrail::create([
+                'user_id' => $userId,
+                'action' => 'APPLICATION_CREDIT_CHECK_RUN',
+                'auditable_type' => LoanApplication::class,
+                'auditable_id' => $application->id,
+                'old_values' => ['status' => $oldStatus],
+                'new_values' => [
+                    'status' => $result['status'],
+                    'risk_band' => $result['risk_band'],
+                    'approved_limit' => $result['approved_limit'],
+                    'rules_passed' => $result['rules_passed'],
+                    'rules_failed' => $result['rules_failed'],
+                ],
+                'ip_address' => substr($ip, 0, 45),
+                'user_agent' => substr($userAgent, 0, 255),
+            ]);
+
+            return $result;
+        });
+    }
+
+    private function assertCheckable(LoanApplication $application): void
+    {
+        if (! in_array($application->status, self::CHECKABLE_STATUSES, true)) {
+            throw new RuntimeException('This application has already been checked.');
+        }
+    }
+}===== app\Models\MakerCheckerRequest.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+final class MakerCheckerRequest extends Model
+{
+    protected $fillable = [
+        'maker_user_id',
+        'action_type',
+        'target_entity_type',
+        'target_entity_id',
+        'payload',
+        'status',
+        'checker_user_id',
+        'checker_notes',
+        'actioned_at',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'payload'     => 'array',
+            'actioned_at' => 'datetime',
+        ];
+    }
+
+    public function maker(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'maker_user_id');
+    }
+
+    public function checker(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'checker_user_id');
+    }
+}===== routes\web.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use App\Enums\UserRole;
+use App\Http\Controllers\Auth\LoginController;
+use App\Http\Controllers\Auth\RegisterController;
+use App\Http\Controllers\Borrower\ApplicationController;
+use App\Http\Controllers\Borrower\PaymentController;
+use App\Http\Controllers\Borrower\PortalController;
+use App\Http\Controllers\Borrower\RestructuringController;
+use App\Http\Controllers\Borrower\StatementController;
+use App\Http\Controllers\ContractVerificationController;
+use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\Lender\ApplicationQueueController;
+use App\Http\Controllers\Lender\CollectionsWorkbenchController;
+use App\Http\Controllers\Lender\MakerCheckerController;
+use App\Http\Controllers\Lender\StatementReviewController;
+use Illuminate\Support\Facades\Route;
+use Spatie\Permission\Middleware\RoleMiddleware;
+
+Route::get('/verify/contract/{code}', [ContractVerificationController::class, 'verify'])->name('contract.verify');
+
+Route::get('/', function () {
+    return view('welcome');
+});
+
+Route::middleware('guest')->group(function () {
+    Route::get('/login', [LoginController::class, 'create'])->name('login');
+    Route::post('/login', [LoginController::class, 'store'])->middleware('throttle:5,1')->name('login.store');
+
+    Route::get('/register', [RegisterController::class, 'create'])->name('register');
+    Route::post('/register', [RegisterController::class, 'store'])->middleware('throttle:5,1')->name('register.store');
+});
+
+Route::post('/logout', [LoginController::class, 'destroy'])->middleware('auth')->name('logout');
+
+Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::staffPipe()])
+    ->prefix('lender')
+    ->name('lender.')
+    ->group(function () {
+        Route::get('/dashboard', [DashboardController::class, 'lender'])->name('dashboard');
+
+        // Applications queue: credit officers and admins act, finance officers view only.
+        Route::middleware(RoleMiddleware::class . ':' . UserRole::applicationViewersPipe())
+            ->prefix('applications')
+            ->name('applications.')
+            ->group(function () {
+                Route::get('/', [ApplicationQueueController::class, 'index'])->name('index');
+                Route::get('/{loanApplication}', [ApplicationQueueController::class, 'show'])->name('show');
+
+                Route::middleware(RoleMiddleware::class . ':' . UserRole::underwritersPipe())
+                    ->group(function () {
+                        Route::post('/{loanApplication}/inflow', [ApplicationQueueController::class, 'updateInflow'])->name('inflow');
+                        Route::post('/{loanApplication}/check', [ApplicationQueueController::class, 'runCheck'])->name('check');
+
+                        // Statement evidence: documents are only for people who decide on them.
+                        Route::get('/statements/{mpesaStatementUpload}/file', [StatementReviewController::class, 'file'])->name('statements.file');
+                        Route::post('/statements/{mpesaStatementUpload}/password', [StatementReviewController::class, 'password'])->name('statements.password');
+                        Route::post('/statements/{mpesaStatementUpload}/accept', [StatementReviewController::class, 'accept'])->name('statements.accept');
+                        Route::post('/statements/{mpesaStatementUpload}/reject', [StatementReviewController::class, 'reject'])->name('statements.reject');
+                    });
+            });
+
+        // Dual-control review desk: approvers only (lender_admin, finance_officer).
+        Route::middleware(RoleMiddleware::class . ':' . UserRole::approversPipe())
+            ->prefix('maker-checker')
+            ->name('maker-checker.')
+            ->group(function () {
+                Route::get('/', [MakerCheckerController::class, 'index'])->name('index');
+                Route::post('/{makerCheckerRequest}/approve', [MakerCheckerController::class, 'approve'])->name('approve');
+                Route::post('/{makerCheckerRequest}/reject', [MakerCheckerController::class, 'reject'])->name('reject');
+            });
+
+        // Collections and in-duplum workbench: read-only (GET only, by design).
+        Route::middleware(RoleMiddleware::class . ':' . UserRole::collectionsViewersPipe())
+            ->prefix('collections')
+            ->name('collections.')
+            ->group(function () {
+                Route::get('/', [CollectionsWorkbenchController::class, 'index'])->name('index');
+            });
+    });
+
+Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::Borrower->value])
+    ->prefix('borrower')
+    ->name('borrower.')
+    ->group(function () {
+        Route::get('/dashboard', [PortalController::class, 'show'])->name('dashboard');
+        Route::get('/apply', [ApplicationController::class, 'create'])->name('apply.create');
+        Route::post('/apply', [ApplicationController::class, 'store'])->middleware('throttle:5,1')->name('apply.store');
+        Route::post('/apply/{loanApplication}/statement', [StatementController::class, 'store'])->middleware('throttle:5,1')->name('statement.store');
+        Route::post('/loans/{loan}/restructuring', [RestructuringController::class, 'accept'])->name('restructuring.accept');
+        Route::post('/loans/{loan}/pay', [PaymentController::class, 'store'])->middleware('throttle:6,1')->name('payment.store');
+    });===== resources\views\lender\applications\show.blade.php ===== 
+@php
+    $pretty = fn (string $v): string => ucwords(strtolower(str_replace('_', ' ', $v)));
+    $kes = fn ($v): string => 'KES ' . number_format((float) $v, 2);
+    $label = fn (string $s): string => match ($s) {
+        'submitted', 'pending' => 'Waiting for check',
+        'approved_pending_checker' => 'Awaiting second approver',
+        'rejected' => 'Did not pass checks',
+        'approved' => 'Approved',
+        default => $pretty($s),
+    };
+    $tone = fn (string $s): string => match ($s) {
+        'approved' => 'success',
+        'rejected' => 'danger',
+        default => 'warning',
+    };
+    $stLabel = fn (string $s): string => match ($s) {
+        'awaiting_review' => 'Waiting for your review',
+        'accepted' => 'Accepted',
+        'rejected' => 'Rejected',
+        'superseded' => 'Replaced by a newer upload',
+        default => $pretty($s),
+    };
+    $stTone = fn (string $s): string => match ($s) {
+        'accepted' => 'success',
+        'rejected' => 'danger',
+        default => 'warning',
+    };
+    $flagText = fn (string $f): string => match ($f) {
+        'same_file_other_borrower' => 'The exact same file was uploaded by a different borrower.',
+        'same_file_earlier_application' => 'This borrower used the exact same file on an earlier application.',
+        default => $pretty($f),
+    };
+    $borrower = $application->borrower;
+    $profile = $borrower?->financialProfile;
+    $requiredInflow = bcmul((string) $application->requested_principal, '1.50', 2);
+    $band = $borrower?->risk_band instanceof \BackedEnum ? $borrower->risk_band->value : $borrower?->risk_band;
+@endphp
+<x-layouts.lender title="Application {{ $application->application_number }}">
+    <div class="space-y-6" x-data="{ busy: false }">
+        <p class="text-sm">
+            <a href="{{ route('lender.applications.index') }}" class="text-brand-700 underline-offset-4 hover:underline">&larr; Back to applications</a>
+        </p>
+
+        @if (session('status'))
+            <div role="status" class="rounded-md border border-brand-500 bg-brand-50 px-4 py-3 text-sm text-brand-900">
+                {{ session('status') }}
+            </div>
+        @endif
+
+        @if ($errors->any())
+            <div role="alert" class="rounded-md border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
+                {{ $errors->first() }}
+            </div>
+        @endif
+
+        <x-card>
+            <div class="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                    <h2 class="text-sm font-semibold">The request</h2>
+                    <p class="mt-1 text-xs tabular-nums text-muted">{{ $application->application_number }}</p>
+                </div>
+                <x-badge tone="{{ $tone((string) $application->status) }}">{{ $label((string) $application->status) }}</x-badge>
+            </div>
+
+            <dl class="mt-4 grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
+                <div>
+                    <dt class="text-xs text-muted">Borrower</dt>
+                    <dd class="font-medium">{{ $borrower?->full_name ?? 'Unknown' }}</dd>
+                </div>
+                <div>
+                    <dt class="text-xs text-muted">Registered phone</dt>
+                    <dd class="font-medium tabular-nums">{{ $borrower?->phone_number ?? 'Unknown' }}</dd>
+                </div>
+                <div>
+                    <dt class="text-xs text-muted">Product</dt>
+                    <dd class="font-medium">{{ $application->product?->name ?? 'Unknown' }}</dd>
+                </div>
+                <div>
+                    <dt class="text-xs text-muted">Amount requested</dt>
+                    <dd class="font-medium tabular-nums">{{ $kes($application->requested_principal) }}</dd>
+                </div>
+            </dl>
+        </x-card>
+
+        <x-card>
+            <h2 class="text-sm font-semibold">Borrower's money picture</h2>
+
+            @if ($profile === null)
+                <p class="mt-3 text-sm text-muted">No financial profile is on file yet. Accepting a statement creates one.</p>
+            @else
+                <dl class="mt-4 grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
+                    <div>
+                        <dt class="text-xs text-muted">Monthly income</dt>
+                        <dd class="font-medium tabular-nums">{{ $kes($profile->monthly_income) }}</dd>
+                    </div>
+                    <div>
+                        <dt class="text-xs text-muted">Monthly expenses</dt>
+                        <dd class="font-medium tabular-nums">{{ $kes($profile->monthly_expenses) }}</dd>
+                    </div>
+                    <div>
+                        <dt class="text-xs text-muted">Existing debt payments</dt>
+                        <dd class="font-medium tabular-nums">{{ $kes($profile->existing_debt_obligations) }}</dd>
+                    </div>
+                    <div>
+                        <dt class="text-xs text-muted">Verified M-Pesa inflow (monthly)</dt>
+                        <dd class="font-medium tabular-nums">{{ $kes($profile->mpesa_average_monthly_inflow) }}</dd>
+                    </div>
+                </dl>
+            @endif
+
+            <p class="mt-4 text-xs text-muted">
+                The verified inflow is set when you accept a statement. This request needs at least {{ $kes($requiredInflow) }} (1.5 times the amount requested).
+            </p>
+        </x-card>
+
+        <x-card>
+            <h2 class="text-sm font-semibold">M-Pesa statements</h2>
+
+            @if ($statements->isEmpty())
+                <p class="mt-3 text-sm text-muted">The borrower has not uploaded a statement yet.</p>
+            @else
+                <div class="mt-3 space-y-6">
+                    @foreach ($statements as $st)
+                        @php
+                            $stValue = $st->review_status->value;
+                            $stFlags = is_array($st->flags) ? $st->flags : [];
+                        @endphp
+                        <div class="rounded-md border border-line p-4">
+                            <div class="flex flex-wrap items-start justify-between gap-3">
+                                <div>
+                                    <p class="text-sm font-medium">{{ $st->original_name ?? 'statement.pdf' }}</p>
+                                    <p class="text-xs tabular-nums text-muted">
+                                        Uploaded {{ $st->created_at?->timezone('Africa/Nairobi')->format('d M Y, H:i') }} EAT
+                                        &middot; {{ number_format(((int) $st->file_size) / 1024, 0) }} KB
+                                        &middot; fingerprint {{ substr((string) $st->file_sha256, 0, 12) }}
+                                    </p>
+                                </div>
+                                <x-badge tone="{{ $stTone($stValue) }}">{{ $stLabel($stValue) }}</x-badge>
+                            </div>
+
+                            @if ($stFlags !== [])
+                                <div class="mt-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900" role="alert">
+                                    <p class="font-medium">Warning flags (staff only)</p>
+                                    <ul class="mt-1 list-disc space-y-0.5 pl-5">
+                                        @foreach ($stFlags as $f)
+                                            <li>{{ $flagText((string) $f) }}</li>
+                                        @endforeach
+                                    </ul>
+                                </div>
+                            @endif
+
+                            @if ($stValue !== 'awaiting_review')
+                                <dl class="mt-3 grid gap-3 text-sm sm:grid-cols-3">
+                                    <div>
+                                        <dt class="text-xs text-muted">Decided by</dt>
+                                        <dd class="font-medium">{{ $st->reviewer?->name ?? 'Not recorded' }}</dd>
+                                    </div>
+                                    <div>
+                                        <dt class="text-xs text-muted">When (EAT)</dt>
+                                        <dd class="font-medium tabular-nums">{{ $st->reviewed_at?->timezone('Africa/Nairobi')->format('d M Y, H:i') ?? 'n/a' }}</dd>
+                                    </div>
+                                    <div>
+                                        <dt class="text-xs text-muted">Valid until</dt>
+                                        <dd class="font-medium tabular-nums">{{ $st->valid_until?->format('d M Y') ?? 'n/a' }}</dd>
+                                    </div>
+                                </dl>
+                                @if ($st->review_notes)
+                                    <p class="mt-2 text-sm text-muted">{{ $st->review_notes }}</p>
+                                @endif
+                            @endif
+
+                            @if ($stValue === 'awaiting_review' && $isUnderwriter)
+                                <div class="mt-4 flex flex-wrap gap-3">
+                                    <a href="{{ route('lender.applications.statements.file', ['mpesaStatementUpload' => $st->id]) }}"
+                                       target="_blank" rel="noopener"
+                                       class="rounded-md border border-brand-600 px-3 py-1.5 text-sm font-medium text-brand-700 hover:bg-brand-50">Open PDF</a>
+
+                                    <form method="POST" action="{{ route('lender.applications.statements.password', ['mpesaStatementUpload' => $st->id]) }}">
+                                        @csrf
+                                        <button type="submit"
+                                                class="rounded-md border border-line px-3 py-1.5 text-sm font-medium hover:bg-paper">Show password</button>
+                                    </form>
+                                </div>
+
+                                @if (session('statement_password') && (int) session('statement_password_for') === (int) $st->id)
+                                    <p class="mt-3 rounded-md border border-line bg-paper px-3 py-2 text-sm">
+                                        Password: <span class="font-mono font-semibold">{{ session('statement_password') }}</span>
+                                        <span class="text-xs text-muted">(shown once, and this view was recorded)</span>
+                                    </p>
+                                @endif
+
+                                @if ($checkable)
+                                    <div class="mt-4 rounded-md bg-paper px-3 py-3 text-xs text-muted">
+                                        <p class="font-medium text-ink">Before you accept, check the PDF:</p>
+                                        <ul class="mt-1 list-disc space-y-0.5 pl-5">
+                                            <li>The name and phone match {{ $borrower?->full_name ?? 'the borrower' }} and {{ $borrower?->phone_number ?? 'their registered number' }}.</li>
+                                            <li>It covers the last 3 months and was generated recently.</li>
+                                            <li>Each balance follows from the one before it, with no gaps or cut-off pages.</li>
+                                            <li>Work out the average money received per month, then enter it below.</li>
+                                        </ul>
+                                    </div>
+
+                                    <div class="mt-4 grid gap-6 lg:grid-cols-2">
+                                        <form method="POST"
+                                              action="{{ route('lender.applications.statements.accept', ['mpesaStatementUpload' => $st->id]) }}"
+                                              class="space-y-2">
+                                            @csrf
+                                            <label for="inflow-{{ $st->id }}" class="block text-sm font-medium">Verified monthly inflow (KES)</label>
+                                            <input id="inflow-{{ $st->id }}" name="verified_inflow" type="text" inputmode="decimal"
+                                                   value="{{ old('verified_inflow') }}"
+                                                   class="w-full rounded-md border border-line px-3 py-2 text-sm tabular-nums focus:outline-none focus:ring-2 focus:ring-brand-500">
+                                            @error('verified_inflow') <p class="text-sm text-red-700" role="alert">{{ $message }}</p> @enderror
+
+                                            <label for="accept-notes-{{ $st->id }}" class="block text-sm font-medium">
+                                                Note {{ $stFlags !== [] ? '(required: this statement has flags)' : '(optional)' }}
+                                            </label>
+                                            <textarea id="accept-notes-{{ $st->id }}" name="notes" rows="2" maxlength="500"
+                                                      class="w-full rounded-md border border-line px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">{{ old('notes') }}</textarea>
+
+                                            <button type="submit"
+                                                    class="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700">Accept statement</button>
+                                        </form>
+
+                                        <form method="POST"
+                                              action="{{ route('lender.applications.statements.reject', ['mpesaStatementUpload' => $st->id]) }}"
+                                              class="space-y-2">
+                                            @csrf
+                                            <label for="reject-reason-{{ $st->id }}" class="block text-sm font-medium">Reason for rejecting (the borrower will see this)</label>
+                                            <textarea id="reject-reason-{{ $st->id }}" name="reason" rows="3" maxlength="500"
+                                                      class="w-full rounded-md border border-line px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"></textarea>
+                                            @error('reason') <p class="text-sm text-red-700" role="alert">{{ $message }}</p> @enderror
+
+                                            <button type="submit"
+                                                    class="rounded-md border border-red-600 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-50">Reject statement</button>
+                                        </form>
+                                    </div>
+                                @endif
+                            @endif
+                        </div>
+                    @endforeach
+                </div>
+            @endif
+
+            @if (! $isUnderwriter && $statements->isNotEmpty())
+                <p class="mt-3 text-sm text-muted">Only credit officers and lender admins can open documents and decide on them.</p>
+            @endif
+        </x-card>
+
+        <x-card>
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                <h2 class="text-sm font-semibold">Credit rules</h2>
+
+                @if ($canAct && $hasAcceptedStatement)
+                    <form method="POST"
+                          action="{{ route('lender.applications.check', ['loanApplication' => $application->id]) }}"
+                          x-on:submit="busy = true">
+                        @csrf
+                        <button type="submit" x-bind:disabled="busy"
+                                class="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60">Run credit check</button>
+                    </form>
+                @endif
+            </div>
+
+            @if ($checkable && ! $canAct)
+                <p class="mt-3 text-sm text-muted">Only credit officers and lender admins can run the check.</p>
+            @endif
+
+            @if ($canAct && ! $hasAcceptedStatement)
+                <p class="mt-3 text-sm text-muted">Accept a valid M-Pesa statement above before the check can run.</p>
+            @endif
+
+            @if ($application->ruleEvaluations->isEmpty())
+                <p class="mt-3 text-sm text-muted">
+                    @if ($checkable)
+                        The check has not been run yet.
+                    @else
+                        No rule results are on file for this application.
+                    @endif
+                </p>
+            @else
+                <div class="mt-3 overflow-x-auto">
+                    <table class="w-full min-w-[36rem] text-left text-sm">
+                        <thead class="text-xs text-muted">
+                            <tr>
+                                <th class="py-2 pr-4 font-medium">Rule</th>
+                                <th class="py-2 pr-4 font-medium">Result</th>
+                                <th class="py-2 pr-4 font-medium">Actual</th>
+                                <th class="py-2 font-medium">Required</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-line">
+                            @foreach ($application->ruleEvaluations as $rule)
+                                <tr class="align-top">
+                                    <td class="py-3 pr-4">{{ $rule->rule_description }}</td>
+                                    <td class="py-3 pr-4">
+                                        <x-badge tone="{{ $rule->status === 'PASSED' ? 'success' : 'danger' }}">{{ ucfirst(strtolower((string) $rule->status)) }}</x-badge>
+                                    </td>
+                                    <td class="py-3 pr-4 tabular-nums">{{ $rule->actual_value }}</td>
+                                    <td class="py-3 tabular-nums">{{ $rule->threshold_value }}</td>
+                                </tr>
+                            @endforeach
+                        </tbody>
+                    </table>
+                </div>
+            @endif
+
+            @if (! $checkable)
+                <dl class="mt-5 grid gap-4 border-t border-line pt-4 text-sm sm:grid-cols-3">
+                    <div>
+                        <dt class="text-xs text-muted">Checked by</dt>
+                        <dd class="font-medium">{{ $application->underwriter?->name ?? 'Not recorded' }}</dd>
+                    </div>
+                    <div>
+                        <dt class="text-xs text-muted">Risk band</dt>
+                        <dd class="font-medium">{{ $band ?? 'Not set' }}</dd>
+                    </div>
+                    <div>
+                        <dt class="text-xs text-muted">Credit limit set</dt>
+                        <dd class="font-medium tabular-nums">{{ $kes($borrower?->credit_limit ?? '0') }}</dd>
+                    </div>
+                </dl>
+
+                @if ($application->rejection_reason)
+                    <p class="mt-3 text-sm text-muted">{{ $application->rejection_reason }}</p>
+                @endif
+            @endif
+        </x-card>
+    </div>
+</x-layouts.lender>===== resources\views\lender\maker-checker\index.blade.php ===== 
+@php
+    $pretty = fn (string $v): string => ucwords(strtolower(str_replace('_', ' ', $v)));
+    $me = (int) auth()->id();
+@endphp
+<x-layouts.lender title="Review desk">
+    <div class="space-y-6"
+         x-data="{
+            modal: null,
+            id: null,
+            label: '',
+            approveUrl: @js(route('lender.maker-checker.approve', ['makerCheckerRequest' => '__ID__'])),
+            rejectUrl: @js(route('lender.maker-checker.reject', ['makerCheckerRequest' => '__ID__'])),
+            openModal(kind, id, label) {
+                this.modal = kind;
+                this.id = id;
+                this.label = label;
+                this.$nextTick(() => { this.$refs.notes.value = ''; this.$refs.notes.focus(); });
+            },
+            close() { this.modal = null; },
+            get url() {
+                return (this.modal === 'approve' ? this.approveUrl : this.rejectUrl).replace('__ID__', this.id);
+            }
+         }"
+         x-on:keydown.escape.window="close()">
+
+        <p class="text-sm text-muted">
+            Two-person rule: whoever raises a request can never be the one who decides it.
+            Every decision is recorded with your name and time.
+        </p>
+
+        @if (session('status'))
+            <div role="status" class="rounded-md border border-brand-500 bg-brand-50 px-4 py-3 text-sm text-brand-900">
+                {{ session('status') }}
+            </div>
+        @endif
+
+        @if ($errors->any())
+            <div role="alert" class="rounded-md border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
+                {{ $errors->first() }}
+            </div>
+        @endif
+
+        <x-card>
+            <h2 class="text-sm font-semibold">Waiting for a decision ({{ $pendingCount }})</h2>
+
+            @if ($pending->isEmpty())
+                <p class="mt-3 text-sm text-muted">Nothing is waiting. You are all caught up.</p>
+            @else
+                <div class="mt-3 overflow-x-auto">
+                    <table class="w-full min-w-[44rem] text-left text-sm">
+                        <thead class="text-xs text-muted">
+                            <tr>
+                                <th class="py-2 pr-4 font-medium">Request</th>
+                                <th class="py-2 pr-4 font-medium">Target</th>
+                                <th class="py-2 pr-4 font-medium">Details</th>
+                                <th class="py-2 pr-4 font-medium">Raised by</th>
+                                <th class="py-2 pr-4 font-medium">Raised (EAT)</th>
+                                <th class="py-2 font-medium">Decision</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-line">
+                            @foreach ($pending as $r)
+                                <tr class="align-top">
+                                    <td class="py-3 pr-4">
+                                        <p class="font-medium">{{ $pretty($r->action_type) }}</p>
+                                        <p class="text-xs tabular-nums text-muted">#{{ $r->id }}</p>
+                                    </td>
+                                    <td class="py-3 pr-4 tabular-nums">{{ class_basename($r->target_entity_type) }} #{{ $r->target_entity_id }}</td>
+                                    <td class="py-3 pr-4">
+                                        <dl class="space-y-0.5 text-xs">
+                                            @forelse (($r->payload ?? []) as $key => $value)
+                                                <div>
+                                                    <dt class="inline text-muted">{{ $pretty((string) $key) }}:</dt>
+                                                    <dd class="inline">{{ is_scalar($value) ? $value : json_encode($value) }}</dd>
+                                                </div>
+                                            @empty
+                                                <span class="text-muted">No extra details</span>
+                                            @endforelse
+                                        </dl>
+                                    </td>
+                                    <td class="py-3 pr-4">{{ $r->maker?->name ?? 'Unknown' }}</td>
+                                    <td class="py-3 pr-4 tabular-nums">{{ $r->created_at?->timezone('Africa/Nairobi')->format('d M Y, H:i') }}</td>
+                                    <td class="py-3">
+                                        @if ((int) $r->maker_user_id === $me)
+                                            <p class="text-xs text-muted">Raised by you. A different approver must decide.</p>
+                                        @else
+                                            <div class="flex gap-2">
+                                                <button type="button"
+                                                        x-on:click="openModal('approve', {{ $r->id }}, @js($pretty($r->action_type)))"
+                                                        class="rounded-md border border-brand-600 px-3 py-1.5 text-xs font-medium text-brand-700 hover:bg-brand-50">Approve</button>
+                                                <button type="button"
+                                                        x-on:click="openModal('reject', {{ $r->id }}, @js($pretty($r->action_type)))"
+                                                        class="rounded-md border border-red-600 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50">Reject</button>
+                                            </div>
+                                        @endif
+                                    </td>
+                                </tr>
+                            @endforeach
+                        </tbody>
+                    </table>
+                </div>
+                @if ($pendingCount > $pending->count())
+                    <p class="mt-3 text-xs text-muted">Showing the oldest {{ $pending->count() }} of {{ $pendingCount }}.</p>
+                @endif
+            @endif
+        </x-card>
+
+        <x-card>
+            <h2 class="text-sm font-semibold">Recent decisions</h2>
+
+            @if ($recent->isEmpty())
+                <p class="mt-3 text-sm text-muted">No decisions yet.</p>
+            @else
+                <div class="mt-3 overflow-x-auto">
+                    <table class="w-full min-w-[40rem] text-left text-sm">
+                        <thead class="text-xs text-muted">
+                            <tr>
+                                <th class="py-2 pr-4 font-medium">Request</th>
+                                <th class="py-2 pr-4 font-medium">Outcome</th>
+                                <th class="py-2 pr-4 font-medium">Decided by</th>
+                                <th class="py-2 pr-4 font-medium">Notes</th>
+                                <th class="py-2 font-medium">When (EAT)</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-line">
+                            @foreach ($recent as $r)
+                                <tr class="align-top">
+                                    <td class="py-3 pr-4">
+                                        <p class="font-medium">{{ $pretty($r->action_type) }}</p>
+                                        <p class="text-xs tabular-nums text-muted">#{{ $r->id }}</p>
+                                    </td>
+                                    <td class="py-3 pr-4">
+                                        <x-badge tone="{{ $r->status === 'approved' ? 'success' : 'danger' }}">{{ $pretty($r->status) }}</x-badge>
+                                    </td>
+                                    <td class="py-3 pr-4">{{ $r->checker?->name ?? 'Unknown' }}</td>
+                                    <td class="py-3 pr-4 text-xs">{{ $r->checker_notes ?: 'No notes' }}</td>
+                                    <td class="py-3 tabular-nums">{{ $r->actioned_at?->timezone('Africa/Nairobi')->format('d M Y, H:i') }}</td>
+                                </tr>
+                            @endforeach
+                        </tbody>
+                    </table>
+                </div>
+            @endif
+        </x-card>
+
+        <div x-show="modal" x-cloak x-transition.opacity
+             class="fixed inset-0 z-40 flex items-end justify-center bg-ink/50 p-4 sm:items-center"
+             x-on:click.self="close()">
+            <div class="w-full max-w-md rounded-lg border border-line bg-white p-5"
+                 role="dialog" aria-modal="true" aria-labelledby="mc-modal-title">
+                <h2 id="mc-modal-title" class="text-base font-semibold"
+                    x-text="modal === 'approve' ? 'Approve this request?' : 'Reject this request?'"></h2>
+                <p class="mt-1 text-sm text-muted">
+                    <span x-text="label"></span> &middot; request #<span x-text="id"></span>
+                </p>
+
+                <form method="POST" x-bind:action="url" class="mt-4 space-y-3">
+                    @csrf
+                    <label for="mc-notes" class="block text-sm font-medium"
+                           x-text="modal === 'reject' ? 'Reason (required)' : 'Notes (optional)'"></label>
+                    <textarea id="mc-notes" name="notes" x-ref="notes" rows="3" maxlength="500"
+                              x-bind:required="modal === 'reject'"
+                              class="w-full rounded-md border border-line px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"></textarea>
+
+                    <div class="flex justify-end gap-2">
+                        <button type="button" x-on:click="close()"
+                                class="rounded-md border border-line px-4 py-2 text-sm font-medium hover:bg-paper">Cancel</button>
+                        <button type="submit"
+                                x-bind:class="modal === 'reject' ? 'bg-red-700 hover:bg-red-800' : 'bg-brand-600 hover:bg-brand-700'"
+                                class="rounded-md px-4 py-2 text-sm font-medium text-white"
+                                x-text="modal === 'reject' ? 'Reject request' : 'Approve request'"></button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</x-layouts.lender>===== tests\Feature\MakerCheckerDeskTest.php ===== 
+<?php
+
+declare(strict_types=1);
+
+use App\Enums\UserRole;
+use App\Models\AuditTrail;
+use App\Models\MakerCheckerRequest;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Spatie\Permission\Models\Role;
+use Tests\TestCase;
+
+uses(TestCase::class, RefreshDatabase::class);
+
+function mcdUser(UserRole $role, string $phone): User
+{
+    Role::findOrCreate($role->value, 'web');
+
+    $user = User::create([
+        'name'         => 'Test ' . $role->value,
+        'email'        => $role->value . '.' . $phone . '@ethical-lending.test',
+        'password'     => bcrypt('Demo@12345'),
+        'phone_number' => $phone,
+        'is_active'    => true,
+    ]);
+
+    $user->assignRole($role->value);
+
+    return $user;
+}
+
+function mcdRequest(User $maker, string $action = 'WAIVE_INTEREST'): MakerCheckerRequest
+{
+    return MakerCheckerRequest::create([
+        'maker_user_id'      => $maker->id,
+        'action_type'        => $action,
+        'target_entity_type' => 'App\\Models\\Loan',
+        'target_entity_id'   => 1,
+        'payload'            => ['reason' => 'Hardship case', 'amount' => '1500.00'],
+        'status'             => 'pending',
+    ]);
+}
+
+it('sends guests to the login page', function () {
+    $this->get(route('lender.maker-checker.index'))->assertRedirect(route('login'));
+});
+
+it('keeps borrowers out of the review desk', function () {
+    $borrower = mcdUser(UserRole::Borrower, '254700000101');
+
+    $this->actingAs($borrower)->get(route('lender.maker-checker.index'))->assertForbidden();
+});
+
+it('keeps staff who cannot approve out of the review desk', function () {
+    $credit = mcdUser(UserRole::CreditOfficer, '254700000102');
+
+    $this->actingAs($credit)->get(route('lender.maker-checker.index'))->assertForbidden();
+});
+
+it('lets approver roles open the review desk', function (string $role) {
+    $this->withoutVite();
+    $approver = mcdUser(UserRole::from($role), '254700000103');
+
+    $this->actingAs($approver)->get(route('lender.maker-checker.index'))->assertOk();
+})->with(['lender_admin', 'finance_officer']);
+
+it('shows pending requests and marks the viewer\'s own request', function () {
+    $this->withoutVite();
+    $maker = mcdUser(UserRole::CreditOfficer, '254700000104');
+    $checker = mcdUser(UserRole::FinanceOfficer, '254700000105');
+    mcdRequest($maker);
+    mcdRequest($checker, 'WRITE_OFF_LOAN');
+
+    $this->actingAs($checker)
+        ->get(route('lender.maker-checker.index'))
+        ->assertOk()
+        ->assertSee('Waive Interest')
+        ->assertSee('Hardship case')
+        ->assertSee('Raised by you');
+});
+
+it('stops a maker approving their own request', function () {
+    $maker = mcdUser(UserRole::FinanceOfficer, '254700000106');
+    $request = mcdRequest($maker);
+
+    $this->actingAs($maker)
+        ->post(route('lender.maker-checker.approve', $request))
+        ->assertSessionHasErrors('review');
+
+    expect($request->fresh()->status)->toBe('pending');
+});
+
+it('lets a different approver approve and records the audit trail', function () {
+    $maker = mcdUser(UserRole::CreditOfficer, '254700000107');
+    $checker = mcdUser(UserRole::FinanceOfficer, '254700000108');
+    $request = mcdRequest($maker);
+
+    $this->actingAs($checker)
+        ->post(route('lender.maker-checker.approve', $request), ['notes' => 'Checked against the file'])
+        ->assertRedirect()
+        ->assertSessionHas('status');
+
+    $fresh = $request->fresh();
+
+    expect($fresh->status)->toBe('approved')
+        ->and($fresh->checker_user_id)->toBe($checker->id)
+        ->and($fresh->checker_notes)->toBe('Checked against the file')
+        ->and(AuditTrail::where('action', 'MAKER_CHECKER_AUTHORIZED')->count())->toBe(1);
+});
+
+it('blocks staff who are not approvers from deciding', function () {
+    $maker = mcdUser(UserRole::FinanceOfficer, '254700000109');
+    $collections = mcdUser(UserRole::CollectionsOfficer, '254700000110');
+    $request = mcdRequest($maker);
+
+    $this->actingAs($collections)
+        ->post(route('lender.maker-checker.approve', $request))
+        ->assertForbidden();
+
+    expect($request->fresh()->status)->toBe('pending');
+});
+
+it('requires a written reason to reject', function () {
+    $maker = mcdUser(UserRole::CreditOfficer, '254700000111');
+    $checker = mcdUser(UserRole::LenderAdmin, '254700000112');
+    $request = mcdRequest($maker);
+
+    $this->actingAs($checker)
+        ->post(route('lender.maker-checker.reject', $request), ['notes' => ''])
+        ->assertSessionHasErrors('notes');
+
+    expect($request->fresh()->status)->toBe('pending');
+});
+
+it('rejects a request when a reason is given', function () {
+    $maker = mcdUser(UserRole::CreditOfficer, '254700000113');
+    $checker = mcdUser(UserRole::LenderAdmin, '254700000114');
+    $request = mcdRequest($maker);
+
+    $this->actingAs($checker)
+        ->post(route('lender.maker-checker.reject', $request), ['notes' => 'Amount does not match the hardship letter'])
+        ->assertRedirect()
+        ->assertSessionHas('status');
+
+    $fresh = $request->fresh();
+
+    expect($fresh->status)->toBe('rejected')
+        ->and($fresh->checker_user_id)->toBe($checker->id)
+        ->and($fresh->checker_notes)->toBe('Amount does not match the hardship letter');
+});
+
+it('does not let a decided request be decided again', function () {
+    $maker = mcdUser(UserRole::CreditOfficer, '254700000115');
+    $checker = mcdUser(UserRole::FinanceOfficer, '254700000116');
+    $request = mcdRequest($maker);
+    $request->update(['status' => 'rejected']);
+
+    $this->actingAs($checker)
+        ->post(route('lender.maker-checker.approve', $request))
+        ->assertSessionHasErrors('review');
+
+    expect($request->fresh()->status)->toBe('rejected');
+});

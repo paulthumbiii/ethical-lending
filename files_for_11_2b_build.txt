@@ -1,0 +1,419 @@
+===== app\Models\MpesaStatementUpload.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+final class MpesaStatementUpload extends Model
+{
+    protected $fillable = [
+        'borrower_id',
+        'file_path',
+        'pdf_password_hash',
+        'parsing_status',
+        'total_inflows_detected',
+        'total_outflows_detected',
+        'gambling_transaction_count',
+        'fuliza_deduction_count',
+        'parsed_at',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'total_inflows_detected'  => 'decimal:2',
+            'total_outflows_detected' => 'decimal:2',
+            'parsed_at'               => 'datetime',
+        ];
+    }
+
+    public function borrower(): BelongsTo
+    {
+        return $this->belongsTo(Borrower::class, 'borrower_id');
+    }
+}===== tests\Feature\MpesaStatementParserTest.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace Tests\Feature;
+
+use App\Models\Borrower;
+use App\Models\BorrowerFinancialProfile;
+use App\Models\MpesaStatementUpload;
+use App\Services\Underwriting\MpesaStatementParserService;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+uses(TestCase::class, RefreshDatabase::class);
+
+test('analyzes raw mpesa statement text correctly and counts fuliza and gambling occurrences', function () {
+    /** @var MpesaStatementParserService $parser */
+    $parser = $this->app->make(MpesaStatementParserService::class);
+
+    $rawSampleText = <<<TEXT
+2026-01-10 10:15:30 Customer Transfer Received From John Maina 254711223344 Completed 12,500.00 Balance 15,200.00
+2026-01-12 14:22:10 Paybill to Sportpesa 522522 Completed 3,000.00 Balance 12,200.00
+2026-01-15 08:05:00 Fuliza Overdraft Repayment Interest Deducted Completed 1,200.00 Balance 11,000.00
+2026-01-20 18:30:11 Paybill to Betika 290290 Completed 2,500.00 Balance 8,500.00
+2026-01-25 11:10:00 Business Paybill From Supermarket Inflow Completed 45,000.00 Balance 53,500.00
+TEXT;
+
+    $metrics = $parser->analyzeTransactions($rawSampleText);
+
+    expect($metrics['total_inflows'])->toBe('57500.00')
+        ->and($metrics['total_outflows'])->toBe('6700.00')
+        ->and($metrics['fuliza_count'])->toBe(1)
+        ->and($metrics['gambling_count'])->toBe(2)
+        ->and($metrics['monthly_average_inflow'])->toBe('19166.66');
+});
+
+test('parses statement upload record and updates borrower financial profile in database', function () {
+    /** @var Borrower $borrower */
+    $borrower = Borrower::create([
+        'full_name' => 'Kiprono Koech',
+        'id_number' => '28910293',
+        'phone_number' => '254722998877',
+        'credit_limit' => '0.00',
+        'risk_band' => \App\Enums\RiskBand::C,
+        'is_blacklisted' => false,
+    ]);
+
+    /** @var MpesaStatementUpload $upload */
+    $upload = MpesaStatementUpload::create([
+        'borrower_id' => $borrower->id,
+        'file_path' => 'statements/test_statement.pdf',
+        'pdf_password_hash' => bcrypt('28910293'),
+        'parsing_status' => 'pending',
+        'total_inflows_detected' => '0.00',
+        'total_outflows_detected' => '0.00',
+        'gambling_transaction_count' => 0,
+        'fuliza_deduction_count' => 0,
+    ]);
+
+    /** @var MpesaStatementParserService $parser */
+    $parser = $this->app->make(MpesaStatementParserService::class);
+
+    $results = $parser->parseStatement($upload->id, '28910293');
+
+    $this->assertDatabaseHas('mpesa_statement_uploads', [
+        'id' => $upload->id,
+        'parsing_status' => 'completed',
+        'fuliza_deduction_count' => 3,
+        'gambling_transaction_count' => 2,
+    ]);
+
+    $this->assertDatabaseHas('borrower_financial_profiles', [
+        'borrower_id' => $borrower->id,
+        'mpesa_average_monthly_inflow' => '50000.00',
+    ]);
+});===== composer.json ===== 
+{
+    "$schema": "https://getcomposer.org/schema.json",
+    "name": "laravel/laravel",
+    "type": "project",
+    "description": "The skeleton application for the Laravel framework.",
+    "keywords": ["laravel", "framework"],
+    "license": "MIT",
+    "require": {
+        "php": "^8.2",
+        "brick/math": "^0.14.8",
+        "laravel/framework": "^12.0",
+        "laravel/tinker": "^2.10.1",
+        "spatie/laravel-permission": "^6.25"
+    },
+    "require-dev": {
+        "fakerphp/faker": "^1.23",
+        "laravel/pail": "^1.2.2",
+        "laravel/pint": "^1.24",
+        "laravel/sail": "^1.41",
+        "mockery/mockery": "^1.6",
+        "nunomaduro/collision": "^8.6",
+        "pestphp/pest": "^3.8",
+        "pestphp/pest-plugin-laravel": "^3.2",
+        "phpunit/phpunit": "^11.5.50"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "app/",
+            "Database\\Factories\\": "database/factories/",
+            "Database\\Seeders\\": "database/seeders/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "setup": [
+            "composer install",
+            "@php -r \"file_exists('.env') || copy('.env.example', '.env');\"",
+            "@php artisan key:generate",
+            "@php artisan migrate --force",
+            "npm install",
+            "npm run build"
+        ],
+        "dev": [
+            "Composer\\Config::disableProcessTimeout",
+            "npx concurrently -c \"#93c5fd,#c4b5fd,#fb7185,#fdba74\" \"php artisan serve\" \"php artisan queue:listen --tries=1 --timeout=0\" \"php artisan pail --timeout=0\" \"npm run dev\" --names=server,queue,logs,vite --kill-others"
+        ],
+        "test": [
+            "@php artisan config:clear --ansi",
+            "@php artisan test"
+        ],
+        "post-autoload-dump": [
+            "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump",
+            "@php artisan package:discover --ansi"
+        ],
+        "post-update-cmd": [
+            "@php artisan vendor:publish --tag=laravel-assets --ansi --force"
+        ],
+        "post-root-package-install": [
+            "@php -r \"file_exists('.env') || copy('.env.example', '.env');\""
+        ],
+        "post-create-project-cmd": [
+            "@php artisan key:generate --ansi",
+            "@php -r \"file_exists('database/database.sqlite') || touch('database/database.sqlite');\"",
+            "@php artisan migrate --graceful --ansi"
+        ],
+        "pre-package-uninstall": [
+            "Illuminate\\Foundation\\ComposerScripts::prePackageUninstall"
+        ]
+    },
+    "extra": {
+        "laravel": {
+            "dont-discover": []
+        }
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "preferred-install": "dist",
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true,
+            "php-http/discovery": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
+===== app\Enums\VerificationStatus.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Enums;
+
+enum VerificationStatus: string
+{
+    case PENDING = 'pending';
+    case VERIFIED = 'verified';
+    case REJECTED = 'rejected';
+}===== resources\views\borrower\apply.blade.php ===== 
+@php
+    $money = fn (string $v): string => 'KES ' . number_format((float) $v, 0);
+    $statusText = [
+        'submitted' => 'Received',
+        'pending' => 'Waiting for review',
+        'approved_pending_checker' => 'Checks passed, waiting for final approval',
+        'approved' => 'Approved, waiting for payout',
+    ];
+@endphp
+<x-layouts.borrower title="Apply">
+    <h1 class="text-xl font-semibold">Apply for a loan</h1>
+
+    @if (session('status'))
+        <div class="mt-4 rounded-lg border border-brand-500 bg-brand-50 px-4 py-3 text-sm text-brand-900" role="status">{{ session('status') }}</div>
+    @endif
+
+    @if ($openApplication)
+        <x-card title="Your application" class="mt-5">
+            <dl class="divide-y divide-line text-sm">
+                <div class="flex justify-between py-2"><dt class="text-muted">Reference</dt><dd>{{ $openApplication->application_number }}</dd></div>
+                <div class="flex justify-between py-2"><dt class="text-muted">Amount</dt><dd class="tabular-nums">{{ $money((string) $openApplication->requested_principal) }}</dd></div>
+                <div class="flex justify-between py-2"><dt class="text-muted">Status</dt><dd>{{ $statusText[$openApplication->status] ?? 'In progress' }}</dd></div>
+            </dl>
+        </x-card>
+    @elseif ($hasActiveLoan)
+        <x-card class="mt-5">
+            <p class="text-sm text-muted">You have a loan that is not fully repaid yet. You can apply again once it is settled.</p>
+        </x-card>
+    @else
+        @if ($lastRejected)
+            <div class="mt-4 rounded-lg border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-800" role="alert">
+                Your last application was not approved{{ $lastRejected->rejection_reason ? ': ' . $lastRejected->rejection_reason : '.' }}
+            </div>
+        @endif
+
+        @if ($products->isEmpty())
+            <x-card class="mt-5">
+                <p class="text-sm text-muted">No loan products are open right now. Please check back soon.</p>
+            </x-card>
+        @else
+            <form method="POST" action="{{ route('borrower.apply.store') }}" class="mt-5 space-y-4">
+                @csrf
+
+                @foreach ($products as $product)
+                    @php $rate = $product->interestRules->first(); @endphp
+                    <label class="block cursor-pointer">
+                        <x-card>
+                            <div class="flex items-start gap-3">
+                                <input type="radio" name="loan_product_id" value="{{ $product->id }}"
+                                       class="mt-1 accent-brand-700" @checked((int) old('loan_product_id', $products->first()->id) === $product->id)>
+                                <div class="flex-1">
+                                    <p class="font-semibold">{{ $product->name }}</p>
+                                    <p class="text-sm text-muted">{{ $money((string) $product->min_principal) }} to {{ $money((string) $product->max_principal) }} over {{ $product->default_tenure_days }} days</p>
+                                    <ul class="mt-2 space-y-1 text-sm">
+                                        @if ($rate)
+                                            <li>Interest: {{ rtrim(rtrim((string) $rate->annual_rate, '0'), '.') }}% a year</li>
+                                        @endif
+                                        @foreach ($product->feeMatrices as $fee)
+                                            <li>
+                                                {{ $fee->fee_name }}:
+                                                @if ((float) $fee->fee_percentage > 0)
+                                                    {{ rtrim(rtrim((string) $fee->fee_percentage, '0'), '.') }}% of the loan
+                                                @else
+                                                    {{ $money((string) $fee->fee_amount) }}
+                                                @endif
+                                                @if ($fee->is_excise_duty_applicable)
+                                                    <span class="text-muted">(includes 20% excise duty paid to KRA)</span>
+                                                @endif
+                                            </li>
+                                        @endforeach
+                                    </ul>
+                                </div>
+                            </div>
+                        </x-card>
+                    </label>
+                @endforeach
+                @error('loan_product_id') <p class="text-sm text-rose-700" role="alert">{{ $message }}</p> @enderror
+
+                <div>
+                    <label for="amount" class="block text-sm font-medium">How much do you need? (KES)</label>
+                    <input id="amount" name="amount" type="text" inputmode="numeric" autocomplete="off"
+                           value="{{ old('amount') }}"
+                           class="mt-1 w-full rounded-md border border-line bg-white px-3 py-2 text-base tabular-nums focus:border-brand-600 focus:outline-none">
+                    @error('amount') <p class="mt-1 text-sm text-rose-700" role="alert">{{ $message }}</p> @enderror
+                </div>
+
+                <x-button type="submit" class="w-full">Send application</x-button>
+                <p class="text-xs text-muted">We check your details before any decision. Applying does not commit you to take the loan.</p>
+            </form>
+        @endif
+    @endif
+</x-layouts.borrower>===== app\Http\Requests\StoreLoanApplicationRequest.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Requests;
+
+use Illuminate\Foundation\Http\FormRequest;
+
+final class StoreLoanApplicationRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    /** @return array<string, mixed> */
+    public function rules(): array
+    {
+        return [
+            'loan_product_id' => ['required', 'integer', 'exists:loan_products,id'],
+            'amount' => ['required', 'regex:/^\d{1,9}$/'],
+        ];
+    }
+
+    /** @return array<string, string> */
+    public function messages(): array
+    {
+        return [
+            'amount.regex' => 'Enter the amount in whole shillings, for example 5000.',
+        ];
+    }
+}===== app\Models\Borrower.php ===== 
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use App\Enums\RiskBand;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+
+final class Borrower extends Model
+{
+    use HasFactory;
+
+    protected $fillable = [
+        'user_id',
+        'full_name',
+        'id_number',
+        'kra_pin',
+        'phone_number',
+        'email',
+        'credit_limit',
+        'risk_band',
+        'is_blacklisted',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'credit_limit'   => 'decimal:2',
+            'risk_band'      => RiskBand::class,
+            'is_blacklisted' => 'boolean',
+        ];
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'user_id');
+    }
+
+    public function financialProfile(): HasOne
+    {
+        return $this->hasOne(BorrowerFinancialProfile::class, 'borrower_id');
+    }
+
+    public function kycDocuments(): HasMany
+    {
+        return $this->hasMany(BorrowerKycDocument::class, 'borrower_id');
+    }
+
+    public function guarantors(): HasMany
+    {
+        return $this->hasMany(Guarantor::class, 'borrower_id');
+    }
+
+    public function crbInquiries(): HasMany
+    {
+        return $this->hasMany(CrbInquiryRecord::class, 'borrower_id');
+    }
+
+    public function loans(): HasMany
+    {
+        return $this->hasMany(Loan::class, 'borrower_id');
+    }
+
+    public function consents(): HasMany
+    {
+        return $this->hasMany(DataProtectionConsent::class, 'borrower_id');
+    }
+
+    public function optOuts(): HasMany
+    {
+        return $this->hasMany(BorrowerOptOut::class, 'borrower_id');
+    }
+}

@@ -4,13 +4,16 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Borrower;
 
+use App\Enums\StatementReviewStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreLoanApplicationRequest;
 use App\Models\AuditTrail;
 use App\Models\Borrower;
 use App\Models\LoanApplication;
 use App\Models\LoanProduct;
+use App\Models\MpesaStatementUpload;
 use App\Services\Customer\BorrowerPortalService;
+use App\Services\Underwriting\ApplicationReviewService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -36,6 +39,19 @@ final class ApplicationController extends Controller
             ->latest('id')
             ->first();
 
+        $openApplication = $latest !== null && in_array($latest->status, self::OPEN_STATUSES, true) ? $latest : null;
+
+        $statement = $openApplication !== null
+            ? MpesaStatementUpload::query()
+                ->where('loan_application_id', $openApplication->id)
+                ->latest('id')
+                ->first()
+            : null;
+
+        $canUploadStatement = $openApplication !== null
+            && in_array($openApplication->status, ApplicationReviewService::CHECKABLE_STATUSES, true)
+            && ($statement === null || $statement->review_status !== StatementReviewStatus::Accepted);
+
         return view('borrower.apply', [
             'borrower' => $borrower,
             'products' => LoanProduct::query()
@@ -43,7 +59,9 @@ final class ApplicationController extends Controller
                 ->with(['interestRules', 'feeMatrices'])
                 ->orderBy('min_principal')
                 ->get(),
-            'openApplication' => $latest !== null && in_array($latest->status, self::OPEN_STATUSES, true) ? $latest : null,
+            'openApplication' => $openApplication,
+            'statement' => $statement,
+            'canUploadStatement' => $canUploadStatement,
             'lastRejected' => $latest !== null && $latest->status === 'rejected' ? $latest : null,
             'hasActiveLoan' => $this->portal->currentLoan($borrower) !== null,
         ]);

@@ -13,15 +13,18 @@ use RuntimeException;
 
 final class MakerCheckerService
 {
+    public const ACTION_APPROVE_LOAN_APPLICATION = 'APPROVE_LOAN_APPLICATION';
+
+    /** The only application status a second approver may act on. */
+    public const APPLICATION_AWAITING_STATUS = 'approved_pending_checker';
+
+    /** Shown to the borrower. Staff notes stay on the request, never on the borrower's screen. */
+    public const BORROWER_REJECTION_REASON = 'This application did not pass final review.';
+
     /**
      * Creates a pending dual-control authorization request.
      *
-     * @param int $makerUserId
-     * @string $actionType (e.g., 'APPROVE_LOAN_DISBURSEMENT', 'WAIVE_INTEREST')
-     * @string $targetEntityType
-     * @int $targetEntityId
-     * @array $payload
-     * @return MakerCheckerRequest
+     * @param array<string, mixed> $payload
      */
     public function createPendingRequest(
         int $makerUserId,
@@ -43,10 +46,7 @@ final class MakerCheckerService
     /**
      * Authorizes and executes a pending request under strict non-self-approval enforcement.
      *
-     * @param int $requestId
-     * @param int $checkerUserId
-     * @param string|null $checkerNotes
-     * @return array
+     * @return array<string, mixed>
      * @throws RuntimeException
      */
     public function authorizeRequest(int $requestId, int $checkerUserId, ?string $checkerNotes = null): array
@@ -68,6 +68,18 @@ final class MakerCheckerService
                 throw new RuntimeException("Dual-Control Violation: You cannot authorize a request you initiated.");
             }
 
+            // Fail closed: an application can only be approved while it is still awaiting a second approver.
+            $application = null;
+            if ($request->action_type === self::ACTION_APPROVE_LOAN_APPLICATION) {
+                $application = LoanApplication::where('id', $request->target_entity_id)
+                    ->lockForUpdate()
+                    ->first();
+
+                if ($application === null || $application->status !== self::APPLICATION_AWAITING_STATUS) {
+                    throw new RuntimeException('This application is no longer waiting for final approval.');
+                }
+            }
+
             $request->update([
                 'status' => 'approved',
                 'checker_user_id' => $checkerUserId,
@@ -75,13 +87,19 @@ final class MakerCheckerService
                 'actioned_at' => now(),
             ]);
 
-            // Execute specific state mutation based on action type
-            if ($request->action_type === 'APPROVE_LOAN_APPLICATION') {
-                /** @var LoanApplication|null $app */
-                $app = LoanApplication::where('id', $request->target_entity_id)->first();
-                if ($app) {
-                    $app->update(['status' => 'approved']);
-                }
+            if ($application !== null) {
+                $application->update(['status' => 'approved']);
+
+                AuditTrail::create([
+                    'user_id' => $checkerUserId,
+                    'action' => 'APPLICATION_FINAL_APPROVED',
+                    'auditable_type' => LoanApplication::class,
+                    'auditable_id' => $application->id,
+                    'old_values' => ['status' => self::APPLICATION_AWAITING_STATUS],
+                    'new_values' => ['status' => 'approved', 'maker_checker_request_id' => $request->id],
+                    'ip_address' => request()->ip() ?? '127.0.0.1',
+                    'user_agent' => request()->userAgent() ?? 'SYSTEM',
+                ]);
             }
 
             // Record immutable Audit Trail
@@ -112,6 +130,9 @@ final class MakerCheckerService
 
     /**
      * Rejects a pending dual-control request and records the decision on the audit trail.
+     * A rejected loan-application request also closes the application, so it is never left hanging.
+     *
+     * @return array<string, mixed>
      */
     public function rejectRequest(int $requestId, int $checkerUserId, string $reason): array
     {
@@ -130,12 +151,42 @@ final class MakerCheckerService
                 throw new RuntimeException("Dual-Control Violation: You cannot reject/action a request you initiated.");
             }
 
+            // Only an application still awaiting a second approver is closed. Anything else is left untouched.
+            $application = null;
+            if ($request->action_type === self::ACTION_APPROVE_LOAN_APPLICATION) {
+                $application = LoanApplication::where('id', $request->target_entity_id)
+                    ->lockForUpdate()
+                    ->first();
+
+                if ($application !== null && $application->status !== self::APPLICATION_AWAITING_STATUS) {
+                    $application = null;
+                }
+            }
+
             $request->update([
                 'status' => 'rejected',
                 'checker_user_id' => $checkerUserId,
                 'checker_notes' => $reason,
                 'actioned_at' => now(),
             ]);
+
+            if ($application !== null) {
+                $application->update([
+                    'status' => 'rejected',
+                    'rejection_reason' => self::BORROWER_REJECTION_REASON,
+                ]);
+
+                AuditTrail::create([
+                    'user_id' => $checkerUserId,
+                    'action' => 'APPLICATION_FINAL_REJECTED',
+                    'auditable_type' => LoanApplication::class,
+                    'auditable_id' => $application->id,
+                    'old_values' => ['status' => self::APPLICATION_AWAITING_STATUS],
+                    'new_values' => ['status' => 'rejected', 'maker_checker_request_id' => $request->id],
+                    'ip_address' => request()->ip() ?? '127.0.0.1',
+                    'user_agent' => request()->userAgent() ?? 'SYSTEM',
+                ]);
+            }
 
             AuditTrail::create([
                 'user_id' => $checkerUserId,

@@ -4,6 +4,7 @@
     $roleLabel = \Illuminate\Support\Str::headline((string) $user->getRoleNames()->first());
     $nav = [
         ['label' => 'Dashboard', 'route' => 'lender.dashboard', 'roles' => null],
+        ['label' => 'Applications', 'route' => 'lender.applications.index', 'roles' => \App\Enums\UserRole::applicationViewers()],
         ['label' => 'Review desk', 'route' => 'lender.maker-checker.index', 'roles' => \App\Enums\UserRole::approvers()],
         ['label' => 'Collections', 'route' => 'lender.collections.index', 'roles' => \App\Enums\UserRole::collectionsViewers()],
     ];
@@ -30,11 +31,11 @@
         <nav class="flex-1 space-y-1 px-3" aria-label="Main">
             @foreach ($nav as $item)
                 <a href="{{ route($item['route']) }}"
-                   @if (request()->routeIs($item['route'])) aria-current="page" @endif
+                   @if (request()->routeIs($item['route']) || request()->routeIs(\Illuminate\Support\Str::beforeLast($item['route'], '.') . '.*')) aria-current="page" @endif
                    @class([
                        'flex items-center rounded-md px-3 py-2 text-sm font-medium',
-                       'bg-white/10 text-white' => request()->routeIs($item['route']),
-                       'hover:bg-white/5' => ! request()->routeIs($item['route']),
+                       'bg-white/10 text-white' => request()->routeIs(\Illuminate\Support\Str::beforeLast($item['route'], '.') . '.*'),
+                       'hover:bg-white/5' => ! request()->routeIs(\Illuminate\Support\Str::beforeLast($item['route'], '.') . '.*'),
                    ])>{{ $item['label'] }}</a>
             @endforeach
         </nav>
