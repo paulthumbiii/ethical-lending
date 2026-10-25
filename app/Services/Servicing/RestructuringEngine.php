@@ -15,9 +15,13 @@ use App\Models\RestructuringProposal;
 use App\Models\RestructuringSchedule;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
+/**
+ * Phase 6 / 11.5b. Restructuring relief.
+ * 11.5b: only penalties are forgiven. The agreed processing fee (FEE_CHARGED rows) stays on the
+ * balance, because it was disclosed at disbursement and its GL and excise postings still stand.
+ */
 final class RestructuringEngine
 {
     private const MINIMUM_ELIGIBILITY_RATIO = '0.30';
@@ -60,7 +64,7 @@ final class RestructuringEngine
     }
 
     /**
-     * Generates a tailored restructuring proposal with penalty fee forgiveness.
+     * Generates a tailored restructuring proposal with penalty forgiveness (processing fee kept).
      */
     public function generateProposal(
         Loan $loan,
@@ -99,8 +103,9 @@ final class RestructuringEngine
             $interestOwed = $latest !== null ? (string) $latest->running_interest_balance : '0.00';
             $feesOwed = $latest !== null ? (string) $latest->running_fees_balance : '0.00';
 
-            // 3. Relief Concessions: Forgive 100% of penalty fees
-            $forgivenPenalties = $feesOwed;
+            // 3. Relief: keep the processing fee (up to what was charged), forgive the rest of the fees bucket.
+            $feeKept = $this->keptFee($lockedLoan->id, $feesOwed);
+            $forgivenPenalties = bcsub($feesOwed, $feeKept, 2);
             $forgivenInterest = '0.00'; // Retain legitimate interest, forgive penalties
             $capitalizedPrincipal = $principalOwed;
             $newRate = $concessionRate ?? (string) $lockedLoan->annual_interest_rate;
@@ -120,8 +125,8 @@ final class RestructuringEngine
                 'accepted_at'              => null,
             ]);
 
-            // 4. Generate Re-amortization Installment Schedule (e.g. 2 bi-weekly installments)
-            $totalRemaining = bcadd($capitalizedPrincipal, $interestOwed, 2);
+            // 4. Re-amortization: two installments covering principal + interest + the kept fee
+            $totalRemaining = bcadd(bcadd($capitalizedPrincipal, $interestOwed, 2), $feeKept, 2);
             $installmentAmount = bcdiv($totalRemaining, '2.00', 2);
             $remainder = bcsub($totalRemaining, bcmul($installmentAmount, '2.00', 2), 2);
 
@@ -174,12 +179,16 @@ final class RestructuringEngine
                 'accepted_at' => $now,
             ]);
 
-            // 2. Post ledger entry clearing forgiven penalties
+            // 2. Post ledger entry clearing the forgiven penalties (the kept fee stays in the fees balance)
             if (bccomp((string) $lockedProposal->forgiven_penalties, '0.00', 2) > 0) {
                 $latest = LoanLedgerEntry::where('loan_id', $loan->id)->latest('id')->first();
-                $newPrincipal = $latest ? $latest->running_principal_balance : $loan->principal_disbursed;
-                $newInterest = $latest ? $latest->running_interest_balance : '0.00';
-                $newTotal = bcadd((string) $newPrincipal, (string) $newInterest, 2);
+                $newPrincipal = $latest ? (string) $latest->running_principal_balance : (string) $loan->principal_disbursed;
+                $newInterest = $latest ? (string) $latest->running_interest_balance : '0.00';
+                $currentFees = $latest ? (string) $latest->running_fees_balance : '0.00';
+
+                $newFees = bcsub($currentFees, (string) $lockedProposal->forgiven_penalties, 2);
+                $newFees = bccomp($newFees, '0.00', 2) < 0 ? '0.00' : $newFees;
+                $newTotal = bcadd(bcadd($newPrincipal, $newInterest, 2), $newFees, 2);
 
                 LoanLedgerEntry::create([
                     'loan_id'                   => $loan->id,
@@ -188,7 +197,7 @@ final class RestructuringEngine
                     'credit'                    => $lockedProposal->forgiven_penalties,
                     'running_principal_balance' => $newPrincipal,
                     'running_interest_balance'  => $newInterest,
-                    'running_fees_balance'      => '0.00',
+                    'running_fees_balance'      => $newFees,
                     'total_running_balance'     => $newTotal,
                     'reference'                 => $lockedProposal->proposal_code,
                     'notes'                     => sprintf(
@@ -247,5 +256,25 @@ final class RestructuringEngine
 
             return $loan;
         });
+    }
+
+    /**
+     * The processing fee that stays: the total ever charged as FEE_CHARGED, capped at what is still owed in fees.
+     * Anything above it in the fees bucket is penalties, which relief may forgive.
+     */
+    private function keptFee(int $loanId, string $feesOwed): string
+    {
+        $charged = '0.00';
+
+        $rows = LoanLedgerEntry::query()
+            ->where('loan_id', $loanId)
+            ->where('entry_type', 'FEE_CHARGED')
+            ->get();
+
+        foreach ($rows as $row) {
+            $charged = bcadd($charged, (string) $row->debit, 2);
+        }
+
+        return bccomp($charged, $feesOwed, 2) < 0 ? $charged : $feesOwed;
     }
 }

@@ -159,15 +159,10 @@ it('declines an application with no verified inflow and records who ran it', fun
         ->count())->toBe(1);
 });
 
-it('passes an application once staff enter enough verified inflow', function () {
-    $app = aquApplication();
+it('passes an application when the accepted statement set enough verified inflow', function () {
+    // Inflow now comes only from an accepted statement (set in the profile), never typed in at check time.
+    $app = aquApplication('7500.00');
     $officer = aquUser(UserRole::CreditOfficer);
-
-    $this->actingAs($officer)
-        ->post(route('lender.applications.inflow', ['loanApplication' => $app->id]), [
-            'mpesa_average_monthly_inflow' => '7500',
-        ])
-        ->assertSessionHasNoErrors();
 
     $this->actingAs($officer)
         ->post(route('lender.applications.check', ['loanApplication' => $app->id]))
@@ -178,33 +173,6 @@ it('passes an application once staff enter enough verified inflow', function () 
 
     expect($app->status)->toBe('approved_pending_checker');
     expect(bccomp((string) $borrower->credit_limit, '3750.00', 2))->toBe(0);
-
-    $audit = AuditTrail::query()
-        ->where('action', 'APPLICATION_INFLOW_UPDATED')
-        ->where('auditable_id', $app->id)
-        ->firstOrFail();
-
-    expect($audit->old_values['mpesa_average_monthly_inflow'])->toBe('0.00');
-    expect($audit->new_values['mpesa_average_monthly_inflow'])->toBe('7500.00');
-    expect((int) $audit->user_id)->toBe((int) $officer->id);
-});
-
-it('refuses to change inflow after the check has run', function () {
-    $app = aquApplication();
-    $officer = aquUser(UserRole::CreditOfficer);
-
-    $this->actingAs($officer)
-        ->post(route('lender.applications.check', ['loanApplication' => $app->id]));
-
-    $this->actingAs($officer)
-        ->post(route('lender.applications.inflow', ['loanApplication' => $app->id]), [
-            'mpesa_average_monthly_inflow' => '9000',
-        ])
-        ->assertSessionHasErrors('review');
-
-    $profile = BorrowerFinancialProfile::query()->where('borrower_id', $app->borrower_id)->firstOrFail();
-
-    expect(bccomp((string) $profile->mpesa_average_monthly_inflow, '0.00', 2))->toBe(0);
 });
 
 it('will not run the same check twice', function () {
@@ -223,19 +191,4 @@ it('will not run the same check twice', function () {
         ->where('action', 'APPLICATION_CREDIT_CHECK_RUN')
         ->where('auditable_id', $app->id)
         ->count())->toBe(1);
-});
-
-it('rejects an invalid inflow amount', function () {
-    $app = aquApplication();
-    $officer = aquUser(UserRole::CreditOfficer);
-
-    foreach (['abc', '-500', '7,500', '10.123'] as $bad) {
-        $this->actingAs($officer)
-            ->post(route('lender.applications.inflow', ['loanApplication' => $app->id]), [
-                'mpesa_average_monthly_inflow' => $bad,
-            ])
-            ->assertSessionHasErrors('mpesa_average_monthly_inflow');
-    }
-
-    expect(AuditTrail::query()->where('action', 'APPLICATION_INFLOW_UPDATED')->count())->toBe(0);
 });

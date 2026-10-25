@@ -6,7 +6,6 @@ namespace App\Services\Underwriting;
 
 use App\Enums\StatementReviewStatus;
 use App\Models\AuditTrail;
-use App\Models\BorrowerFinancialProfile;
 use App\Models\CreditRuleEvaluation;
 use App\Models\LoanApplication;
 use App\Models\MakerCheckerRequest;
@@ -30,62 +29,9 @@ final class ApplicationReviewService
     }
 
     /**
-     * Staff-verified M-Pesa average monthly inflow. Audited with old and new value.
-     */
-    public function updateInflow(
-        int $applicationId,
-        int $userId,
-        string $newInflow,
-        string $ip,
-        string $userAgent
-    ): void {
-        $newInflow = bcadd($newInflow, '0', 2);
-
-        DB::transaction(function () use ($applicationId, $userId, $newInflow, $ip, $userAgent): void {
-            $application = LoanApplication::query()
-                ->where('id', $applicationId)
-                ->lockForUpdate()
-                ->firstOrFail();
-
-            $this->assertCheckable($application);
-
-            $profile = BorrowerFinancialProfile::query()
-                ->where('borrower_id', $application->borrower_id)
-                ->lockForUpdate()
-                ->first();
-
-            $old = $profile !== null
-                ? bcadd((string) $profile->mpesa_average_monthly_inflow, '0', 2)
-                : null;
-
-            if ($profile === null) {
-                BorrowerFinancialProfile::create([
-                    'borrower_id' => $application->borrower_id,
-                    'monthly_income' => '0.00',
-                    'monthly_expenses' => '0.00',
-                    'existing_debt_obligations' => '0.00',
-                    'mpesa_average_monthly_inflow' => $newInflow,
-                ]);
-            } else {
-                $profile->update(['mpesa_average_monthly_inflow' => $newInflow]);
-            }
-
-            AuditTrail::create([
-                'user_id' => $userId,
-                'action' => 'APPLICATION_INFLOW_UPDATED',
-                'auditable_type' => LoanApplication::class,
-                'auditable_id' => $application->id,
-                'old_values' => ['mpesa_average_monthly_inflow' => $old],
-                'new_values' => ['mpesa_average_monthly_inflow' => $newInflow],
-                'ip_address' => substr($ip, 0, 45),
-                'user_agent' => substr($userAgent, 0, 255),
-            ]);
-        });
-    }
-
-    /**
      * Runs the underwriting engine once on a pending application,
      * and only when an accepted, in-date statement backs it.
+     * Phase 11.5c: the typed-inflow override was removed; inflow now comes only from an accepted statement.
      *
      * @return array<string, mixed>
      */

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Exceptions\Fintech\DuplicateWebhookException;
+use App\Services\Financial\Mpesa\B2cDisbursementService;
 use App\Services\Financial\Mpesa\MpesaWebhookService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -13,7 +14,10 @@ use Throwable;
 
 final class MpesaWebhookController extends Controller
 {
-    public function __construct(private readonly MpesaWebhookService $webhookService) {}
+    public function __construct(
+        private readonly MpesaWebhookService $webhookService,
+        private readonly B2cDisbursementService $b2cService
+    ) {}
 
     /**
      * C2B Validation endpoint called by Safaricom prior to confirming Paybill payments.
@@ -87,5 +91,44 @@ final class MpesaWebhookController extends Controller
                 'ResultDesc' => 'Error logged internally',
             ]);
         }
+    }
+
+    /**
+     * B2C Result callback: Safaricom reports whether a loan payout succeeded.
+     */
+    public function b2cResult(Request $request): JsonResponse
+    {
+        try {
+            $this->b2cService->processCallback($request->all());
+
+            return response()->json([
+                'ResultCode' => 0,
+                'ResultDesc' => 'B2C result processed',
+            ]);
+        } catch (Throwable $e) {
+            Log::channel('daily')->error('Error processing B2C result: ' . $e->getMessage());
+
+            return response()->json([
+                'ResultCode' => 0,
+                'ResultDesc' => 'Error logged internally',
+            ]);
+        }
+    }
+
+    /**
+     * B2C Timeout callback: the payout outcome is unknown. We only log it.
+     * The disbursement stays "initiated" so the double-send guard keeps blocking
+     * a second payout until staff have checked what really happened.
+     */
+    public function b2cTimeout(Request $request): JsonResponse
+    {
+        Log::channel('daily')->warning('M-Pesa B2C timeout received. Check this payout by hand.', [
+            'originator_conversation_id' => $request->input('Result.OriginatorConversationID', $request->input('OriginatorConversationID')),
+        ]);
+
+        return response()->json([
+            'ResultCode' => 0,
+            'ResultDesc' => 'Timeout noted',
+        ]);
     }
 }

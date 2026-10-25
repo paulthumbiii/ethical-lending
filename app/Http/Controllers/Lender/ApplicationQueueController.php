@@ -7,11 +7,13 @@ namespace App\Http\Controllers\Lender;
 use App\Enums\StatementReviewStatus;
 use App\Enums\UserRole;
 use App\Http\Controllers\Controller;
-use App\Http\Requests\UpdateApplicationInflowRequest;
+use App\Models\Loan;
 use App\Models\LoanApplication;
 use App\Models\MakerCheckerRequest;
+use App\Models\MpesaB2cDisbursement;
 use App\Models\MpesaStatementUpload;
 use App\Services\Governance\MakerCheckerService;
+use App\Services\Lending\LoanDisbursementWorkflowService;
 use App\Services\Underwriting\ApplicationReviewService;
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\RedirectResponse;
@@ -89,6 +91,15 @@ final class ApplicationQueueController extends Controller
             && $loanApplication->status === ApplicationReviewService::STATUS_AWAITING_SECOND_APPROVER
             && ($latestApprovalRequest === null || $latestApprovalRequest->status !== 'pending');
 
+        $loan = Loan::query()->where('loan_application_id', $loanApplication->id)->first();
+
+        $latestDisbursement = $loan === null
+            ? null
+            : MpesaB2cDisbursement::query()->where('loan_id', $loan->id)->latest('id')->first();
+
+        $canDisburse = (bool) auth()->user()?->hasAnyRole(UserRole::approvers());
+        $canSimulate = $canDisburse && LoanDisbursementWorkflowService::simulationAllowed();
+
         return view('lender.applications.show', [
             'application' => $loanApplication,
             'statements' => $statements,
@@ -98,28 +109,11 @@ final class ApplicationQueueController extends Controller
             'canAct' => $checkable && $isUnderwriter,
             'latestApprovalRequest' => $latestApprovalRequest,
             'canRaiseApproval' => $canRaiseApproval,
+            'loan' => $loan,
+            'latestDisbursement' => $latestDisbursement,
+            'canDisburse' => $canDisburse,
+            'canSimulate' => $canSimulate,
         ]);
-    }
-
-    public function updateInflow(
-        UpdateApplicationInflowRequest $request,
-        LoanApplication $loanApplication
-    ): RedirectResponse {
-        $target = redirect()->route('lender.applications.show', ['loanApplication' => $loanApplication->id]);
-
-        try {
-            $this->service->updateInflow(
-                $loanApplication->id,
-                (int) $request->user()->id,
-                (string) $request->validated('mpesa_average_monthly_inflow'),
-                (string) ($request->ip() ?? '127.0.0.1'),
-                (string) ($request->userAgent() ?? 'unknown')
-            );
-        } catch (RuntimeException $e) {
-            return $target->withErrors(['review' => $e->getMessage()]);
-        }
-
-        return $target->with('status', 'Verified M-Pesa inflow saved.');
     }
 
     public function runCheck(Request $request, LoanApplication $loanApplication): RedirectResponse

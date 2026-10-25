@@ -10,6 +10,8 @@ Route::prefix('v1')->group(function () {
         Route::post('/c2b-validation', [MpesaWebhookController::class, 'c2bValidation']);
         Route::post('/c2b-confirmation', [MpesaWebhookController::class, 'c2bConfirmation']);
         Route::post('/stk-callback', [MpesaWebhookController::class, 'stkCallback']);
+        Route::post('/b2c-result', [MpesaWebhookController::class, 'b2cResult']);
+        Route::post('/b2c-timeout', [MpesaWebhookController::class, 'b2cTimeout']);
     });
 
     // Africa's Talking USSD Gateway (/api/v1/ussd)

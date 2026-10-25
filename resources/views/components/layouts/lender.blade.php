@@ -2,15 +2,22 @@
 @php
     $user = auth()->user();
     $roleLabel = \Illuminate\Support\Str::headline((string) $user->getRoleNames()->first());
+    // Each item may carry 'roles' (role names) and/or 'permission' (a StaffPermission value).
+    // An item with neither is shown to every staff member.
     $nav = [
         ['label' => 'Dashboard', 'route' => 'lender.dashboard', 'roles' => null],
+        ['label' => 'Borrowers', 'route' => 'lender.borrowers.index', 'roles' => null, 'permission' => \App\Enums\StaffPermission::BorrowersView->value],
+        ['label' => 'Loans', 'route' => 'lender.loans.index', 'roles' => null, 'permission' => \App\Enums\StaffPermission::LoansView->value],
+        ['label' => 'Finance', 'route' => 'lender.finance.index', 'roles' => null, 'permission' => 'finance.view'],
+        ['label' => 'Audit', 'route' => 'lender.audit.index', 'roles' => null, 'permission' => 'audit.view'],
         ['label' => 'Applications', 'route' => 'lender.applications.index', 'roles' => \App\Enums\UserRole::applicationViewers()],
         ['label' => 'Review desk', 'route' => 'lender.maker-checker.index', 'roles' => \App\Enums\UserRole::approvers()],
         ['label' => 'Collections', 'route' => 'lender.collections.index', 'roles' => \App\Enums\UserRole::collectionsViewers()],
     ];
     $nav = array_values(array_filter(
         $nav,
-        fn (array $item): bool => ($item['roles'] ?? null) === null || $user->hasAnyRole($item['roles'])
+        fn (array $item): bool => (($item['roles'] ?? null) === null || $user->hasAnyRole($item['roles']))
+            && (($item['permission'] ?? null) === null || $user->can($item['permission']))
     ));
 @endphp
 <!DOCTYPE html>

@@ -12,12 +12,12 @@ use App\Models\LoanLedgerEntry;
 use App\Models\MakerCheckerRequest;
 use Carbon\CarbonImmutable;
 use Illuminate\Contracts\View\View;
-use Illuminate\Http\Request;
 
 final class DashboardController extends Controller
 {
     /**
      * Institutional Command Center for Lender Staff (Admins, Underwriters, Finance, Collections).
+     * Phase 11.5c: the unused borrower() method was removed; the borrower home is Borrower\PortalController.
      */
     public function lender(): View
     {
@@ -83,30 +83,6 @@ final class DashboardController extends Controller
             'pendingMakerCheckerQueue' => $pendingMakerCheckerQueue,
             'inDuplumWatchlist'        => $inDuplumWatchlist,
             'recentLedgerEntries'      => $recentLedgerEntries,
-        ]);
-    }
-
-    /**
-     * Borrower Safe Space Mobile Portal.
-     */
-    public function borrower(Request $request): View
-    {
-        $user = $request->user();
-        $borrower = $user ? $user->borrower : null;
-        $activeLoan = null;
-
-        if ($borrower) {
-            $activeLoan = Loan::query()
-                ->where('borrower_id', $borrower->id)
-                ->whereIn('status', [LoanStatus::DISBURSED, LoanStatus::DEFAULTED, LoanStatus::RESTRUCTURED, LoanStatus::APPROVAL_HOLD])
-                ->with(['inDuplumTracking', 'ledgerEntries'])
-                ->latest('id')
-                ->first();
-        }
-
-        return view('borrower.dashboard', [
-            'borrower'   => $borrower,
-            'activeLoan' => $activeLoan,
         ]);
     }
 }

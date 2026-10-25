@@ -10,6 +10,9 @@ enum UserRole: string
     case CreditOfficer = 'credit_officer';
     case CollectionsOfficer = 'collections_officer';
     case FinanceOfficer = 'finance_officer';
+    case ComplianceOfficer = 'compliance_officer';
+    case Auditor = 'auditor';
+    case SupportAgent = 'support_agent';
     case Borrower = 'borrower';
 
     /** @return list<string> */
@@ -20,6 +23,9 @@ enum UserRole: string
             self::CreditOfficer->value,
             self::CollectionsOfficer->value,
             self::FinanceOfficer->value,
+            self::ComplianceOfficer->value,
+            self::Auditor->value,
+            self::SupportAgent->value,
         ];
     }
 

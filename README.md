@@ -1,59 +1,115 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# Ethical Lending
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+A loan management system for a Kenyan digital lender, built as a skill-learning project. Theme: **lending that shows its working**. Every charge is explained to the borrower, and the lender's staff follow rules that are enforced in code, not just written in a policy.
 
-## About Laravel
+It has two front ends: a desktop dashboard for lender staff and a mobile-first portal for borrowers.
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+## The loan journey (all working in the browser)
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+1. Borrower registers (with data-protection consent) and applies for a loan.
+2. Borrower uploads an M-Pesa statement (PDF) with a consent tick box.
+3. A credit officer reviews the statement and accepts or rejects it (all views are audited).
+4. The credit check runs four hard rules (blacklist, CRB defaults, debt-to-income, M-Pesa inflow).
+5. A **second person** approves in the Review Desk (maker-checker). Nobody approves their own request.
+6. A finance officer or admin sends the money (M-Pesa B2C, with a double-send guard and a SIM-swap guard).
+7. When the payout lands, the 5% processing fee is added to the balance, split 80% revenue and 20% excise in the general ledger.
+8. The borrower sees what they were approved for, what they receive, what they owe, and can repay by STK Push.
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+The borrower timeline tells them in plain English where they are, including when they are approved for less than they asked.
 
-## Learning Laravel
+## What is built
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework. You can also check out [Laravel Learn](https://laravel.com/learn), where you will be guided through building a modern Laravel application.
+- **Append-only loan ledger.** Balances always come from the latest ledger row. Nothing is updated in place.
+- **Double-entry general ledger** with an excise-duty split and accounting periods.
+- **Payment waterfall:** fees, then interest, then principal, then overpayment credit, under row locks.
+- **In-duplum engine:** after default, interest, penalties and collection fees can never exceed the principal at default, and charges then freeze.
+- **Fair collections:** outreach only 08:00 to 18:00 EAT, a 48-hour cooldown, no contacting third parties, and a promise to pay pauses escalation. The workbench is read-only by design.
+- **Restructuring:** relief for struggling borrowers that forgives penalties and keeps the agreed processing fee.
+- **Maker-checker** governance and a **hash-chained outbox** of events.
+- **Auth audit trail,** idempotent M-Pesa callbacks, USSD menu engine, IFRS 9 provisioning, CBK returns and CRB Metro 2 exports.
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+## Rules this project holds itself to
 
-## Laravel Sponsors
+- Money is `DECIMAL(12,2)` in the database and BCMath strings in code. No floats in calculations.
+- `declare(strict_types=1)`, backed enums, FormRequests, service classes.
+- Transactions and `lockForUpdate()` wherever money or state moves.
+- Documents (statements) are private, and only people who decide on them can open them.
+- Software never decides forgery: automatic flags go to a human, who is named in the audit trail.
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+## Setup (Windows, XAMPP)
 
-### Premium Partners
+Requirements: PHP 8.2, Composer, Node, MySQL 8.
 
-- **[Vehikl](https://vehikl.com)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development)**
-- **[Active Logic](https://activelogic.com)**
+```
+composer install
+npm install
+copy .env.example .env
+php artisan key:generate
+```
 
-## Contributing
+Create an empty MySQL database called `ethical_lending`, set `DB_*` in `.env`, then:
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+```
+php artisan migrate
+php artisan db:seed --class=ChartOfAccountSeeder
+php artisan db:seed --class=DemoWalkthroughSeeder
+npm run build
+php artisan serve
+```
 
-## Code of Conduct
+Open http://127.0.0.1:8000.
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+### Demo accounts (local only, password `Demo@12345`)
 
-## Security Vulnerabilities
+| Who | Email | What to look at |
+|---|---|---|
+| Lender admin | admin@ethical-lending.test | Everything |
+| Credit officer | credit@ethical-lending.test | Applications, statement review, credit check |
+| Finance officer | finance@ethical-lending.test | Review Desk, Money out |
+| Collections officer | collections@ethical-lending.test | Collections workbench |
+| Borrower with a paid-out loan | njeri@ethical-lending.test | Balance including the fee |
+| Borrower waiting for payout | otieno@ethical-lending.test | "Approved for less than you asked" |
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+Demo statements are database rows with no PDF behind them, so "Open PDF" does not work for the seeded ones. Upload a real PDF as a new borrower to see the full statement flow.
 
-## License
+**Never run the demo seeders on a live database.** `DemoWalkthroughSeeder` refuses to run outside the local and testing environments.
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+## Tests
+
+```
+php artisan test
+```
+
+Tests run on SQLite in memory. Two lock tests need real MySQL and are skipped by default. A guard in `tests/TestCase.php` refuses to run against any database that is not in-memory or named `*_test`. It exists because an early test cleanup wiped a real database (see "Lessons").
+
+## Money out without Safaricom
+
+Payouts normally need Safaricom credentials and a public HTTPS callback URL. Locally, the **Simulate payout** button (local and testing environments only) completes a payout so the whole journey can be demonstrated with no M-Pesa setup. To try the Daraja sandbox, add your consumer key and secret to `.env` and expose the callback routes with a tunnel such as ngrok.
+
+## Known limitations (read before trusting this with money)
+
+**Proven:** the ledger, general ledger, in-duplum, maker-checker, audit trail, idempotency and the loan journey, by automated tests.
+
+**Not proven or not built:**
+
+- **Never tested against real Safaricom.** The B2C and STK code paths are tested with faked HTTP responses only.
+- **Excise duty treatment is unverified.** The code treats the 20% excise as part of the 5% fee. Excise on fees is normally charged on top of the fee, and the legal rule needs checking before any real use.
+- **B2C call inside a database transaction.** If the process dies after Safaricom accepts a request but before it is saved, money could go out with no record. There is no reconciliation job.
+- **No screen to resolve a stuck payout** (a B2C timeout leaves it as "initiated" and blocks a second send, by design).
+- **B2C and C2B callbacks are unauthenticated.** They need Safaricom IP allow-listing, and `config/mpesa.php` needs `initiator_name` and `security_credential` for real B2C.
+- **Automatic statement checks are not built.** `MpesaStatementParserService` is not used by the upload flow and must not be trusted on real statements. Humans read the statements and type the verified inflow.
+- **Statements have no retention or deletion policy and no malware scan.** The PDF check is a header check only.
+- **Maker-checker executes only loan-application approvals.** Other action types are recorded and audited but do nothing yet.
+- **A lender admin can both approve an application (as the second person) and send its money.**
+- **Repayment split after restructuring is approximate.** Repayments clear fees first but do not record which fee they cleared, so the engine treats any repayment as clearing penalties first.
+- **Not production-ready:** no queue worker, scheduler, backups or monitoring. There is no 2FA, password reset or session timeout for staff.
+- **No operations pages yet** for staff to browse borrowers, ledgers or reports.
+
+## Going live (rough checklist, verify against Safaricom's guide)
+
+A CBK digital credit provider licence, Safaricom go-live approval, a real shortcode and initiator, production keys with `MPESA_ENV=production`, the B2C initiator credentials in config, public HTTPS callbacks with IP allow-listing, and the hardening items above.
+
+## Lessons
+
+- A test cleanup that listed tables through a Laravel schema helper truncated every table on the server, not just the test database, including other projects' databases. Always scope destructive code to the current schema and assert the database name first.
+- AI-assisted code needs proof: save-and-verify checks (`findstr`), test counts, and distrust of any handoff document that disagrees with the disk.

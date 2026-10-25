@@ -1,139 +1,597 @@
-===== database\seeders\DemoLoanSeeder.php ===== 
-<?php
+HANDOFF DOCUMENT: Ethical Lending (Kenya digital-lending LMS, Laravel)
 
-declare(strict_types=1);
+State as of Wednesday 21 Oct 2026, about 22:33 EAT. You are taking over a Laravel project mid-build. Read this whole document before writing any code. It is the only context you will receive. Items marked ⚠️ are things I was not sure of or could not verify. Do not guess; ask the user to confirm.
 
-namespace Database\Seeders;
+Most urgent items, in order
+Phase 11.4c is delivered but unverified. It adds the 5% processing fee to the borrower’s balance when the payout lands. Five files were sent in the last reply (see section 3). The user has not run any of it yet. Expected after it is saved:
+LoanFeeTest: 11 passed.
+Full suite: 258 passed, 2 skipped.
+Last confirmed full-suite result: Tests: 2 skipped, 247 passed (936 assertions), after 11.4a and 11.4b. The user then committed and pushed 11.4a/11.4b to GitHub (“new files have been sent to github”), and git ls-files .env printed nothing. ✅
+11.4c is not committed yet. Suggested commit message: 11.4c processing fee added to balance with excise split and ledger pre-check. The user was told to run git add ., git commit, git push after the tests pass.
+Still unanswered after many asks: the sample M-Pesa statement format (blocks 11.2e), and whether this is coursework, a portfolio piece or a real product. Re-ask once, briefly, then move on.
+Next build after 11.4c is 11.5 (demo seeder, README, cleanup, borrower page showing the approved amount, final test gate). The user has not seen 11.5 planned in detail; the list is in section 3.
+1. PROJECT OVERVIEW
 
-use App\Enums\LoanStatus;
-use App\Models\Borrower;
-use App\Models\InDuplumTracking;
-use App\Models\Loan;
-use App\Models\LoanApplication;
-use App\Models\LoanLedgerEntry;
-use App\Models\LoanProduct;
-use Carbon\CarbonImmutable;
-use Illuminate\Database\Seeder;
-use Illuminate\Support\Facades\DB;
+What it is. “Ethical Lending” is a loan management system for a Kenyan digital lender. It runs the whole life of a loan:
 
-/** LOCAL DEMO ONLY. Never run this against a live database. */
-final class DemoLoanSeeder extends Seeder
-{
-    public function run(): void
-    {
-        $borrower = Borrower::query()->where('id_number', '12345678')->first();
+signing up borrowers, with data-protection consent
+collecting and reviewing M-Pesa statements as evidence
+deciding credit limits
+disbursing and collecting money through M-Pesa
+keeping an append-only double-entry ledger
+restructuring struggling borrowers’ loans
+collecting debts fairly
+producing regulatory reports
 
-        if ($borrower === null) {
-            $this->command?->error('Run DemoUsersSeeder first: the demo borrower was not found.');
+It has two web front ends: a desktop dashboard for lender staff and a mobile-first portal for borrowers. Theme: “lending that shows its working”, meaning every charge is explained and the borrower can see their legal protections.
 
-            return;
-        }
+Who is building it. Thumbi, a developer in Kenya (fourth-year Applied Computer Science student at Egerton University, based around Gilgil/Nakuru). ⚠️ I was never told whether Ethical Lending is coursework, a portfolio project or a real product. I asked repeatedly with no answer. Do not assume. No deadline or budget has ever been stated ⚠️. (He also has another final-year project, RecurTrack, which is unrelated and must not be touched.)
 
-        if (Loan::query()->where('loan_number', 'LN-DEMO-001')->exists()) {
-            $this->command?->info('Demo loan already exists.');
+How work is delivered (important). You do not edit the user’s files. In this project, the AI gives code as chat messages, one file per code block with its exact path, and the user saves each file by hand in VS Code and runs commands in Windows cmd.exe. That is why “file not saved” is the most common failure (see section 6). The user’s free Claude plan has a five-hour session usage window; Anthropic’s help pages say Claude will notify the user when the limit is reached, and I could not confirm any usage meter for free accounts. Keep replies as lean as accuracy allows, and ask for only the FAILED lines of test output.
 
-            return;
-        }
+Current status.
 
-        DB::transaction(function () use ($borrower): void {
-            $now = CarbonImmutable::now();
+Backend Phases 1-8: ✅ complete and tested.
+Phase 9 (web UI: auth and layouts, lender dashboard, borrower portal, maker-checker review desk, collections and in-duplum workbench): ✅
+Phase 10 (hardening: 10.1 borrower login provisioning, 10.2 maker-checker audit fix, 10.3 public sign-up, 10.4 auth audit trail, 10.5 MySQL test config and lock tests, 10.5b STK idempotency guard): ✅
+Phase 11 (the loan journey): 🔄
+11.1 Borrower “Apply for a loan” page: ✅
+11.2 Staff Applications queue and credit check: ✅
+11.2b Borrower statement upload: ✅
+11.2c Staff statement review and credit-check gate: ✅
+11.2d Borrower status timeline: ✅
+11.3 Second person approves in the Review Desk: ✅ (user reported “all the test passed” after the unsaved-controller fix; ⚠️ I never saw the exact numbers)
+11.4a Loan origination, double-send guard, repeat-safe callbacks, B2C result and timeout routes: ✅ (tests passed; ⚠️ the 234 summary line was never shown)
+11.4b Staff “Money out” panel, finance and admin only, plus local simulate-result: ✅ (247 passed, 2 skipped, 936 assertions, seen)
+11.4c Processing fee added to the balance: 🔄 delivered, unverified
+11.2e Automatic statement checks: ⬜ blocked on a sample statement format
+11.5 Demo walkthrough seeder, README, cleanup, final gate: ⬜
 
-            $product = LoanProduct::firstOrCreate(['product_code' => 'BMC-30'], [
-                'name'                        => 'Biashara Micro Capital',
-                'min_principal'               => '1000.00',
-                'max_principal'               => '50000.00',
-                'default_tenure_days'         => 30,
-                'interest_calculation_method' => 'reducing_balance',
-                'is_active'                   => true,
-            ]);
+Browser evidence seen this session (screenshots).
 
-            $application = LoanApplication::create([
-                'application_number'    => 'APP-DEMO-001',
-                'borrower_id'          => $borrower->id,
-                'loan_product_id'      => $product->id,
-                'requested_principal'  => '20000.00',
-                'requested_tenure_days' => 30,
-                'status'               => 'approved',
-            ]);
+The borrower Apply page: the timeline shows Application received, Statement received, Statement checked (“Accepted. Valid until 20 Nov 2026.”), Credit check (Passed), Final approval by a second person, and Approved, all ticked; “Money sent” shows “Waiting for payout.” ✅
+The staff application page /lender/applications/5 (application APP-261018-NJYFXU), logged in as Grace Njeri (lender_admin): the credit rules passed (DTI 38.67%, inflow KES 80,000), checked by Peter Otieno, band C, credit limit set KES 1,125.00, Second approver card “Approved by John Kamau on 21 Oct 2026, 21:12 EAT”, and a “Money out” card reading “Loan LN-261021-9T4XOR is ready: KES 1,125.00 waiting to be sent.” with a Send money button.
+That loan exists with no payout row. Most likely cause: the user pressed the button once, the loan was created, and the Daraja call threw because there are no Safaricom keys locally (the controller then shows “The payout could not be started. Nothing was sent.”). ⚠️ I inferred this; it was not confirmed.
+The borrower requested KES 1,500 but the limit came out at KES 1,125 (band C = 75% of the request), so the borrower would receive less than they asked for. See the 11.5 list.
+The user’s connection was measured at 2.1 Mbps (screenshot of fast.com); the laptop is slow and tests are sometimes slow.
 
-            $loan = Loan::create([
-                'loan_number'         => 'LN-DEMO-001',
-                'loan_application_id' => $application->id,
-                'borrower_id'         => $borrower->id,
-                'loan_product_id'     => $product->id,
-                'principal_disbursed' => '20000.00',
-                'annual_interest_rate' => '18.00',
-                'tenure_days'         => 30,
-                'status'              => LoanStatus::DEFAULTED,
-                'disbursed_at'        => $now->subDays(130),
-                'due_date'            => $now->subDays(100),
-                'defaulted_at'        => $now->subDays(10),
-                'is_in_duplum_locked' => false,
-            ]);
+Where things live.
 
-            // Borrower paid KES 8,000 before default, so principal at default is KES 12,000.
-            LoanLedgerEntry::create([
-                'loan_id'                   => $loan->id,
-                'entry_type'                => 'disbursement',
-                'debit'                     => '20000.00',
-                'credit'                    => '0.00',
-                'running_principal_balance' => '20000.00',
-                'running_interest_balance'  => '0.00',
-                'running_fees_balance'      => '0.00',
-                'total_running_balance'     => '20000.00',
-                'reference'                 => 'DISB-DEMO-001',
-            ]);
+Project folder: C:\Users\evee\ethical-lending on a Windows 10 laptop (cmd.exe, VS Code, XAMPP). Browser: Chrome at http://127.0.0.1:8000.
+Git: branch main, remote origin on GitHub (the username appears to start “paulthumb…” ⚠️ truncated in a browser tab).
+Commits seen earlier: 0ba7ae3 “Initial commit: Core LMS framework...”, 3b27757 “10.4 auth audit trail”, 5e094e4 “Fix lock test cleanup to touch only the _test database”. ⚠️ The later commit hashes were never shown. The user reported, in this session, that everything through 11.4b is committed and pushed. Run git status --short and git log --oneline -8 to confirm.
+.env is git-ignored: ✅ git ls-files .env printed nothing (user-reported this session).
+⚠️ .gitignore should contain files_for_*.txt and *.bak9_1. Not confirmed. Check.
+No secrets were ever pasted. Safaricom Daraja keys belong in .env (MPESA_CONSUMER_KEY, MPESA_CONSUMER_SECRET, MPESA_PASSKEY, MPESA_SHORTCODE, MPESA_B2C_SHORTCODE, MPESA_ENV). Never ask the user to paste them. config/mpesa.php ships a public Safaricom sandbox passkey and shortcode 174379 as defaults. Local MySQL is root with an empty password (XAMPP default); that is not a secret to protect, but never ask for any real credential. ⚠️ config/mpesa.php has no initiator_name or security_credential keys; the B2C service falls back to testapi and testcredential. Real B2C needs those added.
 
-            LoanLedgerEntry::create([
-                'loan_id'                   => $loan->id,
-                'entry_type'                => 'repayment',
-                'debit'                     => '0.00',
-                'credit'                    => '8000.00',
-                'running_principal_balance' => '12000.00',
-                'running_interest_balance'  => '3200.00',
-                'running_fees_balance'      => '1500.00',
-                'total_running_balance'     => '16700.00',
-                'reference'                 => 'PAY-DEMO-001',
-            ]);
+Facts the user confirmed (accumulated).
 
-            InDuplumTracking::create([
-                'loan_id'                      => $loan->id,
-                'defaulted_at'                 => $now->subDays(10),
-                'default_principal_snapshot'   => '12000.00',
-                'total_post_default_interest'  => '3200.00',
-                'total_post_default_penalties' => '1500.00',
-                'statutory_cap_limit'          => '12000.00',
-                'is_frozen'                    => false,
-            ]);
-        });
+php artisan migrate was run on the real MySQL ethical_lending database after the 11.2b migration; the seeders were re-run after the data wipe; npm run build was run (the new pages rendered styled in the screenshots).
+The database guard in tests\TestCase.php is saved.
+11.4a and 11.4b are committed and pushed; .env is not tracked.
 
-        $this->command?->info('Demo defaulted loan LN-DEMO-001 created for the demo borrower.');
-    }
-}===== app\Http\Controllers\Borrower\PortalController.php ===== 
-<?php
+Still unconfirmed (treat all as ⚠️ until the user shows output).
 
-declare(strict_types=1);
+The 11.4c files saving and the 11.4c test results (see the top).
+⚠️ php artisan db:seed --class=ChartOfAccountSeeder on the real MySQL database. It was requested twice; no output was shown. The chart-of-accounts must exist before a real payout. The seeder now creates six accounts (1010, 1200, 2010, 2030, 4010, 4020).
+.gitignore additions.
+LoanLockingMysqlTest has not been run on MySQL since the cleanup fix.
+Browser checks for 11.1, 11.2b, 11.2c, 11.2d and 11.3 were partly confirmed by the screenshots above (timeline, approval, Money out card). The Review Desk page /lender/maker-checker with a real pending request has not been screenshotted ⚠️, although the staff page shows John Kamau approved one.
+--text-2xs and --text-3xs tokens in resources/css/app.css (the 9.2 dashboard uses text-2xs and text-3xs).
+2. END GOAL & SUCCESS CRITERIA
 
-namespace App\Http\Controllers\Borrower;
+End goal. A complete, demonstrable, legally-minded digital lending platform, with the full loan journey working in a browser: register, upload a statement, staff review it, credit check, approve with two people, create the loan, send money, charge fees, repay. Plus a hardened full test suite, polished seeders and docs.
 
-use App\Http\Controllers\Controller;
-use App\Services\Customer\BorrowerPortalService;
-use Illuminate\Http\Request;
-use Illuminate\View\View;
+Success looks like:
 
-final class PortalController extends Controller
-{
-    public function __construct(private readonly BorrowerPortalService $portal)
-    {
-    }
+Phase 11 finished.
+Every feature test green (php artisan test).
+The app demonstrable in a browser for lender and borrower.
+README and seeders polished.
 
-    public function show(Request $request): View
-    {
-        $borrower = $request->user()?->borrower;
+Hard constraints / non-negotiable rules. These come from the user’s own project dossier. I have not independently verified the legal citations ⚠️; treat them as the user’s specification.
 
-        return view('borrower.dashboard', [
-            'borrower' => $borrower,
-            'portal'   => $borrower !== null ? $this->portal->summary($borrower) : null,
-        ]);
-    }
-}
+In-duplum (Banking Act Cap 488, s.44A): after a loan defaults (90 days overdue), interest + penalties + collection fees can never exceed the principal outstanding at default. When reached, is_in_duplum_locked = true and all further charges freeze.
+Fair debt collection (CBK Digital Credit Providers Regulations 2022, Reg. 20): no contact-book scraping, no shaming, no contacting friends or relatives; outreach only 08:00-18:00 East Africa Time; 48-hour cooldown per borrower between automated contacts; an active Promise-to-Pay pauses escalation.
+Data protection (Kenya Data Protection Act 2019): informed consent recorded with IP, user agent and timestamp before processing a loan. Consent for reading M-Pesa statements is a required tick box on the upload form, written to the audit trail. Personal data should not be kept longer than needed ⚠️ (no retention job exists yet for statement files).
+Excise duty: 20% on processing/admin fees; the GL splits fee postings 80% revenue / 20% KRA excise payable. ⚠️ See the excise note in section 8: the code treats the 20% as part of the fee, not on top of it. Verify the legal rule with the user before any real use.
+CRB Regulations 2020: 30-day pre-listing notice before sharing adverse data; dispute locks stop reporting.
+Money rules: all money columns DECIMAL(12,2); no floats in calculations; use BCMath (bcadd, bcsub, bcmul, bcdiv, bccomp) on strings. number_format((float) $x, 2) is allowed for display only.
+Code rules: declare(strict_types=1), backed enums, FormRequests, service classes, transactions and lockForUpdate() where money or state moves.
+Platform rule: the user works in Windows cmd.exe (8,191-character command limit): no giant inline commands or multi-line shell scripts.
+
+Honest framing already given to the user: “industrial” is not measured in tables or pages. The hard core (ledger, GL, in-duplum, maker-checker, audit, idempotency, tests) is strong. What is missing is the operations UI (Phase 11, then a Phase 12), proof against real Safaricom, production running (queue worker, scheduler, backups, monitoring), and staff security (2FA, password reset, session timeout).
+
+3. ROADMAP
+Phase	Status	Notes
+1 Tooling (Laravel 12, Vite, Tailwind v4, Alpine, Pest, Spatie Permission)	✅	
+2 Schema and models	✅	51+ models, ~62 tables
+3 KYC/consent, M-Pesa statement parser, underwriting engine, maker-checker service	✅	
+4 Ledger, in-duplum engine, payment waterfall, GL and excise, outbox (SHA-256 chain)	✅	
+5 Daraja OAuth, B2C disbursement with SIM-swap guard, C2B and STK callbacks, simulation harness	✅	
+6 Restructuring, fair collections, PDF contract and QR verification	✅	
+7 USSD *384# engine	✅	
+8 IFRS 9 ECL, CBK returns, CRB Metro 2 exports	✅	
+9.1-9.4b UI	✅	
+10.1-10.5b hardening	✅	
+11.1 to 11.3	✅	see section 1
+11.4a origination and B2C safety	✅	LoanOriginationTest 12
+11.4b Money out panel and simulate	✅	LoanDisbursementWorkflowTest 13; suite 247/2 confirmed
+11.4c fee added to balance	🔄 delivered, unverified	LoanFeeTest 11; target 258 passed, 2 skipped
+11.2e automatic statement checks	⬜ blocked	needs sample statement layout
+11.5 demo seeder, README, cleanup, final gate	⬜	replaces old 10.6
+12 (proposed, not agreed) operations pages, production readiness, staff security	⬜	raised, no explicit approval
+Completed phases: what was built and why (summary of choices)
+Append-only ledger. Balances always come from the latest loan_ledger_entries row; never updated in place.
+Payment waterfall order: fees and penalties, then interest, then principal; leftover becomes overpayment credit; runs under lockForUpdate().
+Restructuring: eligibility needs repayment ratio ≥ 0.30 (no loans counts as 1.00; loans with no repayments counts as 0 and is refused); forgives 100% of fees, keeps interest, splits the rest into two instalments, expires in 7 days.
+Auth: hand-written login (email or phone plus password), no Breeze, single web guard; inactive and role-less accounts are blocked. Auth audit rows are written by a listener (RecordAuthActivity) on Laravel’s Login, Failed and Logout events. It masks identifiers and never stores passwords.
+Role gates in one place: UserRole helpers feed both routes and nav.
+Collections workbench is read-only by construction.
+Security choices: payment phone numbers come only from the DB; loans are looked up through $borrower->loans() so another borrower’s id returns 404; throttles on login, register, apply, statement upload and payments; FormRequests always authorize() true because role middleware on the route does access control.
+Apply page (11.1): one open application or active loan at a time, enforced with lockForUpdate() on the borrower row inside a transaction; whole-shilling amounts validated against product min/max with BCMath; tenure = product default; credit limit deliberately not checked at application time (the engine derives the limit from the request).
+
+Why 11.2 to 11.2c exist. The underwriting engine’s Rule 4 (M-Pesa inflow ≥ 1.5 × requested principal) originally trusted a number a staff member typed. Self-registered borrowers have inflow 0 and would all be rejected. The user wanted real evidence: borrowers upload detailed M-Pesa statements, staff review them, the applicant sees the state, and forgery is considered (“people tend to forge these documents”). So the inflow figure is now set only by accepting an uploaded statement.
+
+11.2 (staff queue). lender.applications.* routes. lender_admin and credit_officer can open the queue and act (UserRole::underwriters()); finance_officer can view only (UserRole::applicationViewers() includes finance). Pages: lender/applications/index.blade.php (waiting list, recently checked) and show.blade.php.
+
+11.2b (borrower upload). Statement card on the Apply page. PDF only (extension plus %PDF- header check), max 5 MB, stored privately under storage/app/private/statements/{borrower_id}/{random 40 chars}.pdf (disk local, root storage/app/private). SHA-256 recorded. The optional PDF password is stored encrypted with Crypt (APP_KEY) and erased when staff decide. Consent tick box required and audited. A newer upload supersedes one still waiting. Automated flags (staff-only, never shown to the borrower): same_file_other_borrower, same_file_earlier_application. Uploads only allowed while the application status is submitted or pending, and not after a statement was accepted. Ownership: another borrower’s application returns 404.
+
+11.2c (staff review). On the application page an underwriter sees each statement with name, size, fingerprint (first 12 hex chars) and flags. They can:
+
+Open the PDF (streams from the private disk, audited as STATEMENT_VIEWED).
+Show the password (flash message shown once, audited as STATEMENT_PASSWORD_REVEALED, password never written to the audit row).
+Accept (staff type the verified average monthly inflow; flagged statements require a written note; sets valid_until = today + 30 days; erases the stored password; updates borrower_financial_profiles.mpesa_average_monthly_inflow with old and new values audited as STATEMENT_ACCEPTED).
+Reject (written reason required, shown to the borrower; erases the password; audited as STATEMENT_REJECTED).
+Gate: ApplicationReviewService::runCheck() throws RuntimeException('Accept a valid M-Pesa statement before running the credit check.') unless an upload for that application has review_status = accepted and valid_until >= today (whereDate).
+
+11.2d (borrower timeline). app/Services/Customer/ApplicationTimelineService.php build(LoanApplication): array returns seven steps (received, statement_received, statement_checked, credit_check, second_approval, approved, money_sent). Each has key, title, detail, state; states are done, current, upcoming, problem. Only the newest statement upload counts. “Money sent” is done when the application’s loan has disbursed_at. Component resources/views/components/application-timeline.blade.php; screen-reader text carries the state, not colour alone; staff-only flags never appear. Wired into borrower/apply.blade.php.
+
+11.3 (second approver). After the engine passes an application (approved_pending_checker), a credit officer or admin presses Send for final approval. That creates a maker-checker request APPROVE_LOAN_APPLICATION (target LoanApplication) with a payload summary. A different approver (lender_admin or finance_officer) approves it in the Review Desk (/lender/maker-checker), and the application becomes approved.
+
+MakerCheckerService: approval fails closed unless the application is in approved_pending_checker; rejection closes the application (status rejected, fixed borrower-safe reason This application did not pass final review.; the checker’s real note stays only on the request); self-approval and self-rejection refused. Audit actions APPLICATION_FINAL_APPROVED, APPLICATION_FINAL_REJECTED, APPLICATION_SENT_FOR_APPROVAL.
+ApplicationReviewService::requestFinalApproval(), ApplicationQueueController::requestApproval(), route lender.applications.final-approval, component application-approval-panel.blade.php, FinalApprovalTest (10).
+⚠️ Design decisions made on the user’s behalf and never explicitly approved: a rejection by the second approver closes the application; the borrower sees only the fixed message.
+
+11.4a (origination, double-send guard, B2C routes), built and tested this session.
+
+app/Services/Lending/LoanOriginationService.php, originate(int $applicationId, int $userId, string $ip, string $userAgent): Loan. Locks the application and borrower rows. Refuses unless the application status is exactly approved, a loan already exists for it, the borrower is blacklisted, the product has no ProductInterestRule, or the amount is zero.
+Principal = lesser of requested_principal and the borrower’s credit_limit, cut down to whole shillings (bcadd($x, '0', 0)), because M-Pesa B2C sends whole shillings and the ledger must match.
+Rate = the product’s first ProductInterestRule (by id) annual_rate.
+due_date = now + tenure (reset to the delivery day when money lands).
+Status APPROVAL_HOLD; loan_number like LN-261021-9T4XOR; audit LOAN_CREATED.
+B2cDisbursementService (replaced):
+initiateDisbursement runs under the loan row lock and refuses unless the loan is APPROVAL_HOLD and no mpesa_b2c_disbursements row for it has status initiated or successful. A failed row allows a retry. The Safaricom HTTP call still happens inside the DB transaction ⚠️ (known weakness).
+processCallback is idempotent: a disbursement already successful is returned unchanged. findDisbursement never matches on an empty id and throws RuntimeException('The callback has no conversation id.') if both are empty. On success the due date restarts from the delivery day.
+MpesaWebhookController (replaced): added b2cResult and b2cTimeout. Both return ResultCode 0 to Safaricom. A timeout is only logged (daily channel) and the disbursement stays initiated, so the guard keeps blocking a second send until a human checks. ⚠️ A staff screen to mark such a payout “checked, failed” has not been built.
+routes/api.php: POST /api/v1/mpesa/b2c-result and /b2c-timeout (no authentication; ⚠️ Safaricom callbacks should be IP allow-listed before going live).
+ChartOfAccountSeeder created (see 11.4b).
+Tests: LoanOriginationTest (12, helper prefix lor).
+
+11.4b (Money out panel and simulate), built and tested this session (247 passed, 2 skipped, 936 assertions).
+
+app/Services/Lending/LoanDisbursementWorkflowService.php:
+disburse() creates the loan if none exists for the application, then calls initiateDisbursement. A failed result is turned into a plain RuntimeException (“Safaricom did not accept the payout request (…). Nothing was sent. You can try again.”).
+simulateResult() is local/testing only (simulationAllowed() is app()->environment(['local', 'testing'])). It locks the loan, requires APPROVAL_HOLD, reuses the latest initiated row or creates a fake SIM-… one, writes audit LOAN_DISBURSEMENT_SIMULATED, then calls processCallback with a success result. It refuses in production.
+app/Http/Controllers/Lender/LoanDisbursementController.php: store() and simulate(). Catches SimSwapRiskDetectedException (plain “SIM changed recently” message), RuntimeException, and any other Throwable (reports it and shows “The payout could not be started. Nothing was sent. Check the log and try again.”).
+Routes in routes/web.php, inside the applications group, restricted by UserRole::approversPipe() (finance_officer and lender_admin only; deliberately not credit officers): POST /lender/applications/{loanApplication}/disburse (name lender.applications.disburse) and POST /lender/applications/{loanApplication}/simulate-payout (name lender.applications.simulate-payout).
+ApplicationQueueController::show() also passes loan, latestDisbursement, canDisburse and canSimulate.
+resources/views/components/application-disbursement-panel.blade.php (“Money out” card). Shown when the application is approved or a loan exists. States: sent, waiting (initiated), ready/failed, with the send or simulate button only for approvers. The simulate button only appears while a payout row is initiated.
+resources/views/lender/applications/show.blade.php has the panel line after the approval panel.
+database/seeders/ChartOfAccountSeeder.php seeds 1010 M-Pesa Settlement Account, 1200 Loans Receivable (ASSET); 2010 Customer Overpayment Credits, 2030 KRA Excise Duty Payable (LIABILITY); 4010 Interest Income, 4020 Fee Income (REVENUE). Account types match what GeneralLedgerTest uses.
+Tests: LoanDisbursementWorkflowTest (13, helper prefix ldw).
+
+11.4c (fee added to the balance), delivered this session, ⚠️ unverified.
+
+Decision (user chose option 2): the fee is added to the balance. The borrower receives the full principal and owes principal + fee. The M-Pesa amount stays equal to the principal.
+Created with php artisan make:class Services/Lending/LoanFeeService and php artisan make:test LoanFeeTest --pest.
+app/Services/Lending/LoanFeeService.php:
+quote(Loan) computes fees from FeeMatrix rows. percentage = percent of principal rounded half up to the cent (BCMath: bcadd(bcdiv(bcmul(principal, pct, 4), '100', 4), '0.005', 2)); fixed or flat = fee_amount; any other type is skipped.
+charge(Loan, receipt) writes one FEE_CHARGED ledger entry per fee through LoanLedgerService::recordEntry, then a GL posting (recordFeeWithExcisePosting for excise-applicable fees, otherwise a plain 1200/4020 entry), and an audit row LOAN_FEE_CHARGED. It does nothing if a FEE_CHARGED ledger row already exists for the loan.
+chargedTotal(Loan) sums the debits of the loan’s FEE_CHARGED rows.
+assertLedgerReady(Loan) throws RuntimeException('The ledger is missing accounts (…). Run the ChartOfAccountSeeder before sending money.') if 1010 or 1200 is missing, or 4020 (and 2030 when any quoted fee carries excise) when the product has a fee.
+B2cDisbursementService (replaced again): processCallback now calls a private chargeFees() after the GL posting. It runs inside DB::transaction (a savepoint) wrapped in try/catch; on failure it rolls back only the fee, logs to the daily channel and writes audit LOAN_FEE_CHARGE_FAILED, so the loan is still recorded as disbursed. Reason: money has already left; losing the disbursement record is worse than a missing fee.
+LoanDisbursementWorkflowService (replaced): constructor now takes LoanFeeService; disburse() calls assertLedgerReady($loan) before initiateDisbursement, so nothing is sent if the ledger cannot book it.
+application-disbursement-panel.blade.php (replaced): shows “Charges added when the money lands”, each fee, and “The borrower receives KES X and will owe KES Y in total” before sending; after sending it shows “Fees added to the balance: KES Z”. It calls app(LoanFeeService::class) directly inside the Blade @php block.
+Tests: tests/Feature/LoanFeeTest.php (11, helper prefix lfe): rounding half up (1,001.00 × 1.50% → 15.02), fixed fee, unknown fee type skipped, ledger row (principal 5000.00, fees 250.00, total 5250.00 for a 5,000 loan at 5%), GL split 200/50 and the TaxWithholdingLedger row, non-excise fee straight to 4020, repeat callback charges once, failed fee still completes disbursement and writes the audit row, refuses to send when ledger accounts are missing, and both panel states.
+Next 3–5 actions, in order
+
+1. Close out 11.4c. Ask the user to run one command per block and paste the output:
+
+findstr /C:"function assertLedgerReady" app\Services\Lending\LoanFeeService.php
+findstr /C:"private function chargeFees" app\Services\Financial\Mpesa\B2cDisbursementService.php
+findstr /C:"assertLedgerReady" app\Services\Lending\LoanDisbursementWorkflowService.php
+findstr /C:"Charges added when the money lands" resources\views\components\application-disbursement-panel.blade.php
+findstr /C:"function lfeSetup" tests\Feature\LoanFeeTest.php
+php artisan view:clear
+php artisan test --filter=LoanFeeTest
+php artisan test
+
+Expect 11 passed, then 258 passed and 2 skipped. If any findstr prints nothing, resend that file at once (this has now happened four times; see section 6).
+
+Likely failure to watch: MpesaSimulationTest and B2cDisbursementTest may expect exactly one ledger row after a success callback. They do not create fee rows, so they should be fine; but if any test builds a product with a FeeMatrix row, the callback now adds a second ledger row. Fix the test’s expectation, not the fee logic. If the fintech log channel were undefined, the fee would silently fail inside the savepoint and show up as audit LOAN_FEE_CHARGE_FAILED (see risk below).
+
+2. Git. After green: git add ., git commit -m "11.4c processing fee added to balance with excise split and ledger pre-check", git push. Remind the user once that a commit is not on GitHub until pushed. Also ask for git status --short and confirm .gitignore has files_for_*.txt and *.bak9_1.
+
+3. Run the real-database seeder if not yet confirmed: php artisan db:seed --class=ChartOfAccountSeeder. Safe to run twice (firstOrCreate).
+
+4. Re-ask the two open questions (statement header line plus one fake transaction row and whether the PDF needs a password; coursework, portfolio piece or real product), briefly, once.
+
+5. Build 11.5. Planned content, in this order (state it to the user before coding; he likes a brief “what we’re building”):
+
+Borrower sees the approved amount. The Apply page and timeline should say when the approved amount (credit limit) is lower than requested (the screenshot case: asked 1,500, approved 1,125), and show the fee that will be added. Requires reading borrower/apply.blade.php, ApplicationController and BorrowerApplyTest first; ask for the files, do not rebuild blind (a past mistake).
+Demo walkthrough seeder (the demo path now needs an accepted statement, an approved application, the chart of accounts, and a loan). ⚠️ The user said “there is no need for the happy path”, meaning he declined a “create loan only” demo button. Note that the Simulate M-Pesa result button only appears when a payout row is initiated, which cannot happen locally without Daraja keys. If the demo seeder should show a completed payout, ask the user first whether the seeder may create an initiated row or a finished loan.
+README.
+Remove unused DashboardController::borrower().
+Decide the fate of the leftover lender.applications.inflow route and ApplicationReviewService::updateInflow() (the form was removed from the page; the route and 3 tests in ApplicationQueueTest still use it; keep as an audited override or remove them together).
+Add a fintech log channel if missing (see risks).
+Add files_for_*.txt and *.bak9_1 to .gitignore.
+Check whether restructuring (which forgives 100% of fees) also reverses the fee’s GL posting and the TaxWithholdingLedger row. I have not seen RestructuringEngine, so ask for it.
+Consolidate the three copies of the “awaiting second approver” status string.
+⚠️ UX gap: the staff Applications queue “waiting” list shows only submitted/pending. Applications awaiting a second approver, or approved and waiting for money out, appear only under “Recently checked” (last 20). Consider listing them separately.
+Final php artisan test gate.
+Known blockers, risks, open questions
+⚠️ Coursework, portfolio or real product: unanswered.
+⚠️ Sample statement format: unanswered (blocks 11.2e).
+⚠️ Excise on fees. The code treats the fee as the amount the borrower owes (5% of principal) and splits 20% of it to excise payable. Kenyan excise on lender fees is normally charged on top of the fee. I flagged this to the user; he did not respond. Verify before anything goes live. If it should be on top, it is a small change in LoanFeeService/GeneralLedgerService::recordFeeWithExcisePosting.
+⚠️ fintech log channel. CreditUnderwritingEngine, MakerCheckerService, the parser and LoanLedgerService::recordEntry call Log::channel('fintech'). Once, a failing run showed InvalidArgumentException: Log [fintech] is not defined from CreditUnderwritingEngine.php:151; an earlier agent called that a “harmless red herring” without verifying. LoanLedgerServiceTest calls it and passes, so it is probably defined, but I never saw config/logging.php. New relevance: if undefined, 11.4c’s fee would fail inside its savepoint and only show as audit LOAN_FEE_CHARGE_FAILED. If ever seen, ask the user to run type config\logging.php > files_for_logging.txt and check for fintech.
+⚠️ MpesaStatementParserService cannot be trusted for real statements. It is NOT called by the upload flow. It takes the first amount on each line (may be the balance), classifies inflow by keywords, divides by a hard-coded 3 months, ignores the PDF password, smalot/pdfparser is not installed (it falls back to raw bytes), and it writes inflow straight into the profile without review or audit. The mock fallback (fake KES 50,000/month when the file is missing) runs only when app()->environment('testing'). Rewrite or replace it in 11.2e; make it only propose a figure, never write to the profile.
+⚠️ No retention or deletion policy for statement PDFs. No malware scan. The “PDF” check is a header check only.
+⚠️ Statement reuse across applications is not built (valid_until is 30 days but the gate only looks at statements of the same application).
+⚠️ Tiered rigor is only an idea (section 8); do not build without asking.
+⚠️ B2cDisbursementService::initiateDisbursement makes the Safaricom HTTP call inside a DB transaction holding a row lock. If the HTTP call throws (no keys locally, or a network failure), the transaction rolls back and no disbursement row is saved, but the loan row created earlier by LoanOriginationService (a separate committed transaction) remains. If Safaricom accepts the request but our process dies before the row is saved, the money could go out with no record; there is no reconciliation job. Consider moving the HTTP call outside the transaction with a persisted initiated row first.
+⚠️ No staff way to resolve a B2C timeout (disbursement stuck in initiated). A stuck row blocks a second payout by design.
+⚠️ B2C callback endpoints are unauthenticated; add Safaricom IP allow-listing before production. ⚠️ config/mpesa.php lacks initiator_name and security_credential (defaults testapi/testcredential are used).
+⚠️ DispatchMpesaB2cDisbursementJob calls initiateDisbursement directly. The job has tries = 3 with backoff. The new guard means a retry after a partial success is refused, which is safe, but the job is not used by the new UI flow (the controller calls the service synchronously). Decide whether to keep or remove it.
+⚠️ Race: in a true simultaneous duplicate C2B callback, the unique index on trans_id rejects the second insert; a catch converts it to DuplicateWebhookException. Cannot be reproduced in a single-process test.
+⚠️ In-duplum cap source: borrower meter and collections workbench read in_duplum_tracking.statutory_cap_limit; lender dashboard reads default_principal_snapshot. Assumed equal.
+⚠️ Workbench cap label: in_duplum_tracking stores only post-default interest and penalties; the statutory cap also counts collection fees, so the workbench column is labelled “Charged since default”.
+⚠️ “You owe in total” on the borrower screen = principal + interest + fees from the latest ledger row. With 11.4c the fee now appears there automatically. Adjust BorrowerPortalService::summary() if the lender’s definition differs.
+⚠️ config/mpesa.php has the stk_callback_url key now (seen in the dump). .env still needs MPESA_STK_CALLBACK_URL= (not confirmed). STK Push cannot send real prompts until a public HTTPS callback URL exists (for example ngrok). Pressing Pay locally shows “payment prompts are not switched on”, which is expected.
+⚠️ --text-2xs: 0.6875rem; and --text-3xs: 0.625rem; in the @theme block of resources/css/app.css: not confirmed.
+⚠️ Registration edge not closed: BorrowerOnboardingService checks the phone against users, and the request checks ID and email against borrowers, but nothing checks whether a borrowers row with that phone already exists without a login (created by USSD or staff). ⚠️ Unknown whether borrowers.phone_number has a unique index. A fix was offered; the user did not answer.
+⚠️ Maker-checker execution gap: approving any action type other than APPROVE_LOAN_APPLICATION records approval and an audit row but executes nothing (for example WAIVE_INTEREST does not touch the ledger). Making it fail closed would break MakerCheckerDeskTest (approves WAIVE_INTEREST) and LenderDashboardTest (uses loan_disbursement). The proper fix is a per-action-type executor. Ask the user before touching it.
+⚠️ The ledger has two entry-type vocabularies: older code writes lowercase disbursement and repayment (the waterfall and B2C service), while LoanLedgerService uses uppercase types (DISBURSEMENT_PRINCIPAL, FEE_CHARGED, REPAYMENT_*). The 11.4c fee uses FEE_CHARGED through LoanLedgerService, which reads the latest row’s running balances correctly regardless of the previous row’s type. Do not “fix” the mix without checking every consumer.
+⚠️ LoanLockingMysqlTest takes about 144 s per test on MySQL (unmeasured since the cleanup fix). Normal SQLite suite: 46.58 s on the last run (it has varied from 61 s to 289 s on this laptop). Looks like laptop or antivirus slowness. Not investigated.
+⚠️ Password reveal uses a session flash, so the password appears in the page HTML once for the staff member who requested it. Acceptable for now.
+4. FILE STRUCTURE
+
+C:\Users\evee\ethical-lending
+
+app/
+  Console/Commands/   CalculateEclProvisionsCommand, CheckInDuplumCapsCommand, ExportRegulatoryReturnsCommand,
+                      GenerateCoreBankingModels, ProcessFairCollectionsCommand, PublishOutboxEventsCommand,
+                      SimulateMpesaTransactionCommand
+  Enums/              LoanStatus (PENDING, APPROVAL_HOLD, DISBURSED, RESTRUCTURED, DEFAULTED, SETTLED, WRITTEN_OFF),
+                      RiskBand (A, B, C, D), VerificationStatus (pending, verified, rejected),
+                      StatementReviewStatus (AwaitingReview 'awaiting_review', Accepted, Rejected, Superseded; borrowerLabel()),
+                      UserRole (LenderAdmin 'lender_admin', CreditOfficer 'credit_officer',
+                        CollectionsOfficer 'collections_officer', FinanceOfficer 'finance_officer', Borrower 'borrower';
+                        helpers staff(), staffPipe(), approvers(), approversPipe(), collectionsViewers(), collectionsViewersPipe(),
+                        underwriters(), underwritersPipe(), applicationViewers(), applicationViewersPipe())
+  Exceptions/Fintech/ AccountingPeriodClosed, DataProtectionConsentMissing, DuplicateWebhook, InDuplumCapExceeded,
+                      InvalidPaymentAmount, MpesaAuthentication, OutsideLegalOutreachHours, RegulatoryCooldownActive,
+                      RestructuringNotEligible, SimSwapRiskDetected, UnbalancedJournalEntry, StkPushFailedException
+  Http/Controllers/   Controller, ContractVerificationController,
+                      MpesaWebhookController [11.4a: + b2cResult(), b2cTimeout(); constructor takes MpesaWebhookService + B2cDisbursementService],
+                      UssdController,
+                      DashboardController (lender() = analytics; borrower() UNUSED, remove in 11.5),
+                      Auth/LoginController, Auth/RegisterController,
+                      Borrower/PortalController, Borrower/RestructuringController, Borrower/PaymentController,
+                      Borrower/ApplicationController, Borrower/StatementController,
+                      Lender/MakerCheckerController, Lender/CollectionsWorkbenchController,
+                      Lender/ApplicationQueueController [11.2; 11.2c; 11.3; 11.4b passes loan/payout/permission flags],
+                      Lender/StatementReviewController [11.2c],
+                      Lender/LoanDisbursementController [11.4b new: store(), simulate()]
+  Http/Middleware/    EnforceMakerChecker
+  Http/Requests/      BorrowerRegistrationRequest, LoginRequest, AcceptRestructuringRequest, StkPaymentRequest,
+                      ReviewMakerCheckerRequest, CollectionsWorkbenchFilterRequest, StoreLoanApplicationRequest,
+                      UpdateApplicationInflowRequest, StoreStatementRequest, AcceptStatementRequest, RejectStatementRequest
+  Jobs/               DispatchMpesaB2cDisbursementJob (tries 3, backoff 30; calls initiateDisbursement; not used by the new UI flow),
+                      ProcessMpesaCallbackJob, ProcessMpesaStatementJob (unused by the new flow)
+  Listeners/          RecordAuthActivity
+  Models/             51+ Eloquent models (Borrower, Loan, LoanApplication, LoanProduct, ProductInterestRule, FeeMatrix,
+                      LoanLedgerEntry, InDuplumTracking, RestructuringProposal, MpesaStkRequest, MpesaB2cDisbursement,
+                      MpesaC2bCallback, MakerCheckerRequest, CreditRuleEvaluation, CrbInquiryRecord, BorrowerFinancialProfile,
+                      BorrowerKycDocument, MpesaStatementUpload, CollectionCase, CollectionAction, RegulatoryCooldownLock,
+                      PromiseToPay, PaymentWaterfallLog, AuditTrail, OutboxEvent, ChartOfAccount, JournalEntry, JournalItem,
+                      AccountingPeriod, TaxWithholdingLedger, User, ...)
+  Providers/          AppServiceProvider
+  Services/
+    Analytics/        Ifrs9ProvisioningService
+    Compliance/       CbkStatutoryReturnService, CrbMetro2ExporterService
+    Customer/         BorrowerOnboardingService, BorrowerPortalService, ApplicationTimelineService
+    Financial/        GeneralLedgerService, InDuplumEnforcementService, LoanLedgerService, PaymentWaterfallService,
+                      TransactionalOutboxService
+    Financial/Mpesa/  B2cDisbursementService [11.4a, 11.4c: replaced], DarajaClient (OAuth token only), MpesaSimulationHarness,
+                      MpesaWebhookService, SimSwapProtectionService, StkPushService
+    Governance/       MakerCheckerService
+    Lending/          LoanOriginationService [11.4a new], LoanDisbursementWorkflowService [11.4b new; 11.4c edited],
+                      LoanFeeService [11.4c new]
+    Omnichannel/      UssdMenuEngine
+    Servicing/        ContractGeneratorService, FairCollectionsService, RestructuringEngine
+    Underwriting/     CreditUnderwritingEngine (DO NOT MODIFY: tested and working), MpesaStatementParserService,
+                      ApplicationReviewService, StatementIntakeService, StatementReviewService
+config/mpesa.php, config/filesystems.php (disk 'local' root = storage/app/private), config/logging.php (⚠️ 'fintech' channel unverified)
+database/
+  migrations/         all through 2026_10_16_214638_create_crb_report_exports_table + add_user_id_to_borrowers_table
+                      + 2026_10_18_115937_add_review_columns_to_mpesa_statement_uploads_table
+                      (chart_of_accounts: 2026_10_05_174724; fee_matrices: 2026_10_05_153401; tax_withholding_ledgers: 2026_10_05_174727)
+  seeders/            DatabaseSeeder (stock Laravel; creates test@example.com), RolesSeeder, DemoUsersSeeder, DemoLoanSeeder,
+                      DemoCollectionsSeeder, LoanProductSeeder, ChartOfAccountSeeder [11.4a new; 11.4b replaced with 6 accounts]
+  factories/          UserFactory (⚠️ no phone_number; always create users with User::create in tests)
+phpunit.xml           forces SQLite :memory: (DO NOT CHANGE without asking)
+phpunit.mysql.xml     forces MySQL database ethical_lending_test via force="true" envs
+resources/
+  css/app.css         Tailwind v4 @theme tokens
+  js/                 app.js (Alpine started), bootstrap.js
+  views/
+    welcome.blade.php, pdf/loan-contract.blade.php
+    auth/login.blade.php, auth/register.blade.php
+    lender/dashboard.blade.php, lender/maker-checker/index.blade.php, lender/collections/index.blade.php,
+    lender/applications/index.blade.php, lender/applications/show.blade.php [11.4b: panel line added]
+    borrower/dashboard.blade.php, borrower/apply.blade.php
+    components/         card (prop title), stat, badge (tone: success/danger/warning), button, input, in-duplum-meter,
+                        repayment-form, application-timeline, application-approval-panel,
+                        application-disbursement-panel [11.4b new; 11.4c replaced]
+    components/layouts/ guest, lender (nav: Dashboard, Applications, Review desk, Collections), borrower (Home / Apply / Sign out tabs)
+routes/                 api.php [11.4a: + b2c-result, b2c-timeout], console.php, web.php [11.4b: + disburse, simulate-payout]
+storage/app/private/statements/{borrower_id}/{random}.pdf   uploaded statements (private disk, never public)
+tests/
+  TestCase.php          has the database guard assertDatabaseIsSafeForTests (confirmed saved)
+  Unit/ExampleTest.php
+  Feature/              inventory below
+
+Ignore: public/build/* (Vite output), storage/* (except the private statements folder), vendor/, node_modules/, database/database.sqlite (unused), files_for_*.txt (temporary paste dumps, e.g. files_for_114.txt, files_for_114b.txt, files_for_114c.txt), deploy_step_9_1.php (rejected format, never use), any .bak9_1 files.
+
+Routes (current)
+
+routes/web.php:
+
+/ welcome; /verify/contract/{code}.
+Guest group: GET/POST /login (POST throttle 5/min; names login, login.store), GET/POST /register (throttle 5/min; register, register.store).
+POST /logout (auth).
+Lender group (prefix /lender, names lender., middleware auth + RoleMiddleware::class . ':' . UserRole::staffPipe()):
+GET /dashboard.
+/lender/applications group (applicationViewers): GET / (lender.applications.index), GET /{loanApplication} (.show).
+Nested underwriters-only group: POST /{loanApplication}/inflow (.inflow), POST /{loanApplication}/check (.check), POST /{loanApplication}/final-approval (.final-approval), GET /statements/{mpesaStatementUpload}/file (.statements.file), POST /statements/{mpesaStatementUpload}/password, /accept, /reject.
+Nested approvers-only group [11.4b]: POST /{loanApplication}/disburse (.disburse), POST /{loanApplication}/simulate-payout (.simulate-payout).
+/lender/maker-checker (approvers only): GET /, POST /{makerCheckerRequest}/approve, /reject.
+/lender/collections (collectionsViewers): GET / only, read-only by design.
+Borrower group (role borrower, prefix /borrower, names borrower.): GET /dashboard, GET /apply (borrower.apply.create), POST /apply (borrower.apply.store, throttle 5/min), POST /apply/{loanApplication}/statement (borrower.statement.store, throttle 5/min), POST /loans/{loan}/restructuring, POST /loans/{loan}/pay (throttle 6/min).
+
+routes/api.php (no auth, under /api/v1): POST /mpesa/c2b-validation, /mpesa/c2b-confirmation, /mpesa/stk-callback, /mpesa/b2c-result [11.4a], /mpesa/b2c-timeout [11.4a], /ussd.
+
+Role middleware uses Spatie\Permission\Middleware\RoleMiddleware::class . ':role|role' directly (no alias registered).
+
+Test inventory (target after 11.4c: 260 tests = 258 passed + 2 skipped)
+
+AuthAccessTest 12 · AuthAuditTrailTest 5 · B2cDisbursementTest 4 · BorrowerApplyTest 10 · BorrowerDashboardTest 13 · BorrowerLoginProvisioningTest 9 · BorrowerOnboardingTest 2 · BorrowerPortalServiceTest 7 · BorrowerRegistrationPageTest 10 · CollectionsWorkbenchTest 14 · ContractGeneratorTest 3 · CreditUnderwritingEngineTest 2 · DarajaAuthTest 4 · ExampleTest (Feature) 1 · ExampleTest (Unit) 1 · FairCollectionsTest 6 · GeneralLedgerTest 5 · Ifrs9ProvisioningTest 4 · InDuplumEnforcementTest 6 · LenderDashboardTest 3 · LoanLedgerServiceTest 1 · LoanLockingMysqlTest 2 (skipped on SQLite) · MakerCheckerDeskTest 12 · MakerCheckerIntegrityTest 4 · MakerCheckerServiceTest 2 · MpesaSimulationTest 4 · MpesaStatementParserTest 2 · MpesaStkIdempotencyTest 3 · MpesaWebhookTest 4 · PaymentWaterfallTest 5 · RegulatoryReturnsTest 3 · RestructuringEngineTest 4 · TransactionalOutboxTest 4 · UssdMenuTest 4 · ApplicationQueueTest 9 · StatementUploadTest 10 · StatementReviewTest 11 · ApplicationTimelineTest 9 · FinalApprovalTest 10 · LoanOriginationTest 12 · LoanDisbursementWorkflowTest 13 · LoanFeeTest 11.
+
+Confirmed totals: 203/2 (before 11.2d); 212/2 (after 11.2d, 811 assertions); 247 passed, 2 skipped, 936 assertions (after 11.4b, seen). ⚠️ 222 (after 11.3) and 234 (after 11.4a) were reported by the user as passing but the summary lines were not shown. 258 passed is the expected total after 11.4c, not yet seen.
+
+5. TECHNICAL DETAILS
+
+Stack. PHP 8.2.12, Composer 2.10.3, Node v24.21.0, Laravel 12, MySQL 8 via XAMPP (database ethical_lending, port 3306, user root, empty password; MySQL binary C:\xampp\mysql\bin\mysql), Blade components, Tailwind CSS v4 (@tailwindcss/vite), Alpine.js, Pest 3.8 with pest-plugin-laravel, Spatie Laravel-Permission ^6.25 (guard web), brick/math. Not installed: smalot/pdfparser. Editor: VS Code (code file.txt).
+
+Commands.
+
+php artisan migrate
+php artisan db:seed --class=RolesSeeder
+php artisan db:seed --class=DemoUsersSeeder
+php artisan db:seed --class=LoanProductSeeder
+php artisan db:seed --class=DemoLoanSeeder
+php artisan db:seed --class=DemoCollectionsSeeder
+php artisan db:seed --class=ChartOfAccountSeeder
+npm run build
+php artisan serve
+php artisan test
+php artisan test --filter=TestNameHere
+php artisan view:clear
+php artisan config:clear
+composer dump-autoload
+
+Spell out npm run build exactly (he once typed npm build). MySQL test run (only if the user agrees): php artisan test --configuration=phpunit.mysql.xml --filter=... (first run builds all tables in ethical_lending_test; about 195 s). php artisan db:show fails on XAMPP (missing performance_schema); harmless, don’t use it. make:view, make:test X --pest, make:request, make:controller, make:class all work. make:enum may not exist.
+
+⚠️ php artisan make:view creates a stub containing only a placeholder comment (“Walk as if you are kissing the Earth with your feet. - Thich Nhat Hanh”). If the user forgets to replace it with the real file, the page renders that comment and the feature silently doesn’t appear. This caused 3 of the 4 failures in 11.4b. Always tell the user to replace the whole generated file, and include a findstr check for it.
+
+Test environment. phpunit.xml forces SQLite :memory:. Consequences: SQLite ignores lockForUpdate(); it is looser with decimals and returns ints for ids; migrations tested on SQLite do not prove the real MySQL database was migrated. phpunit.mysql.xml forces DB_CONNECTION=mysql, DB_DATABASE=ethical_lending_test, with force="true".
+
+Database guard. tests\TestCase.php overrides setUpTraits() to call assertDatabaseIsSafeForTests() before RefreshDatabase runs. It allows SQLite :memory: or any database name ending in _test; anything else throws. ✅ Confirmed saved.
+
+Pest conventions in this repo (important).
+
+There is no tests/Pest.php. Every test file must start with uses(TestCase::class, RefreshDatabase::class); (importing Tests\TestCase and Illuminate\Foundation\Testing\RefreshDatabase), except the MySQL lock test, which uses uses(TestCase::class) only.
+Tests that render Blade pages must call $this->withoutVite();.
+Helper functions declared inside test files are global in Pest. Existing prefixes: authTestUser, portalLoan, portalTracking, bpProduct, bpUser, bpBorrower, bpLoan, bpHistory, bpFakeDaraja, mcdUser, mcdRequest, cwbUser, cwbCase, cwbLock, cwbPromise, blpPayload, blpErrorKeys, mciUser, mciRequest, brpPayload, laaUser, mlkLoan, mlkHoldRowLock, mlkEmptyTestDatabase, msiLoan, bapBorrower, bapProduct, aquUser, aquApplication, stuSetup, stuPdf, stuPayload, stuUrl, srtUser, srtApplication, srtAcceptUrl, srtRejectUrl, atlSetup, atlStatement, atlStates, fapUser, fapApplication, fapSendUrl, fapShowUrl, and new this session: lorSetup, lorOriginate, lorFakeDaraja, lorSentDisbursement, lorSuccessPayload, ldwUser, ldwSetup, ldwFakeDaraja, ldwUrl, ldwLoan, lfeSetup, lfeComplete, lfeAdmin, lfeAccountTotal. Use a new unique prefix or you get a fatal “cannot redeclare” error.
+⚠️ MpesaStkIdempotencyTest uses DB::table(...); the user was told to add use Illuminate\Support\Facades\DB; manually and said “green”.
+assertSee() is case-sensitive and checks raw HTML.
+Roles in tests: Role::findOrCreate($role->value, 'web') or $this->seed(RolesSeeder::class).
+Create users with User::create([...]) including phone_number (required, unique, format 2547XXXXXXXX) and is_active => true.
+Time tests: $this->travelTo(CarbonImmutable::parse('2026-10-19 10:00:00', 'Africa/Nairobi')). Throttle tests: withServerVariables(['REMOTE_ADDR' => ...]).
+⚠️ Str::headline() on ALL-CAPS strings like WAIVE_INTEREST splits letters; use ucwords(strtolower(str_replace('_', ' ', $v))).
+File upload tests use Storage::fake('local') and UploadedFile::fake()->createWithContent('statement.pdf', "%PDF-1.4\n...").
+⚠️ Do not test “production behavior” through an HTTP POST by switching detectEnvironment to production. That also turns on CSRF checking, so the POST fails with 419 before reaching your code (this broke one of my own tests). Call the service directly instead, restoring 'testing' in a finally.
+Minimum rows to create a loan in tests: Borrower (full_name, id_number, phone_number, credit_limit, risk_band, is_blacklisted), LoanProduct (name, product_code, min_principal, max_principal, default_tenure_days, interest_calculation_method e.g. 'reducing_balance', is_active), ProductInterestRule (loan_product_id, tier_name, annual_rate, monthly_rate, compounding_frequency), LoanApplication (application_number, borrower_id, loan_product_id, requested_principal, requested_tenure_days, status), then LoanOriginationService::originate(...) or a direct Loan::create. GL tests need ChartOfAccount rows (account_code, account_name, account_type, currency, is_active).
+HTTP faking for B2C: Http::fake(['*/oauth/v1/generate*' => Http::response(['access_token' => 'TEST_TOKEN', 'expires_in' => 3599], 200), '*/mpesa/b2c/v1/paymentrequest*' => Http::response([...], 200)]).
+Key files and facts (use these exact columns)
+Loan fillable: loan_number, loan_application_id (unique), borrower_id, loan_product_id, principal_disbursed, annual_interest_rate (decimal 5,2), tenure_days, status (LoanStatus cast; default 'pending'), disbursed_at, due_date (nullable timestamps), defaulted_at, is_in_duplum_locked. Relations: borrower, application, product, ledgerEntries, inDuplumTracking (hasOne), amortizationSchedules, restructuringProposals, collectionCase (hasOne), legalContract, writeOff, waterfallLogs.
+LoanApplication: fillable application_number (unique), borrower_id, loan_product_id, requested_principal (decimal:2 cast), requested_tenure_days, status (string 30; migration default 'submitted'), underwriter_id, rejection_reason. Status values in use: pending (set by the apply page), approved_pending_checker (engine pass), rejected, approved (after maker-checker). The apply page treats submitted, pending, approved_pending_checker, approved as “open” (ApplicationController::OPEN_STATUSES). ApplicationReviewService::CHECKABLE_STATUSES = ['submitted', 'pending']. LoanOriginationService::APPLICATION_APPROVED = 'approved'.
+LoanProduct fillable: name, product_code (unique), min_principal, max_principal, default_tenure_days, interest_calculation_method, is_active. Relations: interestRules, feeMatrices, penaltyPolicies, loans.
+ProductInterestRule: loan_product_id, tier_name, annual_rate, monthly_rate, compounding_frequency (casts decimal:2).
+FeeMatrix (table fee_matrices): loan_product_id (FK, cascade), fee_name, calculation_type (string 30), fee_amount (decimal 12,2, NOT NULL), fee_percentage (decimal 5,2, NOT NULL), is_excise_duty_applicable (bool, default true). Seeded product fee: “Processing fee”, percentage, 5.00%, excise applicable. When creating fee rows in tests, both fee_amount and fee_percentage must be given.
+TaxWithholdingLedger: loan_id, fee_name, fee_charged, excise_rate (default 20.00), excise_duty_amount, remittance_status (default 'accrued'), remitted_at.
+ChartOfAccount: account_code (unique, 20), account_name, account_type (30), currency (default KES), is_active; journalItems() hasMany. GL codes used by GeneralLedgerService: 1010, 1200, 2010, 2030, 4010, 4020. postBalancedEntry auto-creates a monthly AccountingPeriod if none exists and throws AccountingPeriodClosedException if locked; it throws UnbalancedJournalEntryException if debits ≠ credits; account lookup is firstOrFail, so a missing account aborts the posting.
+LoanLedgerService::recordEntry(loanId, entryType, debit, credit, reference, notes): locks the loan and latest entry; types DISBURSEMENT_PRINCIPAL, INTEREST_ACCRUAL, PENALTY_CHARGED, FEE_CHARGED (adds debit to fees), REPAYMENT_PRINCIPAL_CREDIT, REPAYMENT_INTEREST_CREDIT, REPAYMENT_FEES_CREDIT, WAIVER_INTEREST_CREDIT, WAIVER_FEES_CREDIT; clamps balances at zero; calls Log::channel('fintech').
+LoanLedgerEntry: $timestamps = false; columns loan_id, entry_type, debit, credit, running_principal_balance, running_interest_balance, running_fees_balance, total_running_balance, reference, notes.
+PaymentWaterfallService::executeWaterfall(Loan, amount, reference, source): fees, then interest, then principal; writes a repayment ledger row, a payment_waterfall_logs row, settles the loan (status SETTLED plus a loan.settled outbox event) when the balance is zero. ⚠️ It does not call GeneralLedgerService::recordRepaymentPosting; whether repayment GL posting happens elsewhere (webhook service) was not verified.
+BorrowerFinancialProfile (one per borrower): monthly_income, monthly_expenses, mpesa_average_monthly_inflow (default 0.00), existing_debt_obligations.
+CreditRuleEvaluation: loan_application_id, rule_identifier, rule_description, status ('PASSED'/'FAILED'), actual_value, threshold_value, created_at only. Rule ids: RULE_01_BLACKLIST_CHECK, RULE_02_CRB_DEFAULTS, RULE_03_DTI_RATIO, RULE_04_MPESA_INFLOW_CAPACITY.
+CreditUnderwritingEngine::evaluateApplication(int $applicationId): array (DO NOT MODIFY). Four hard rules: blacklist; CRB defaulted accounts = 0; DTI (expenses + existing debt) / income ≤ 50% (income 0 fails); M-Pesa inflow ≥ 1.5 × requested principal. Failure: rejected, band D, limit 0.00. Pass: approved_pending_checker, band by CRB score (no record = 600; ≥750 → A, limit 125% of request; ≥650 → B, 100%; else C, 75%). It updates the borrower’s risk_band and credit_limit. Demo expectation: income 60,000, expenses 25,000, request 5,000 passes DTI; inflow must be ≥ 7,500; no CRB record gives band C and a 3,750.00 limit.
+MpesaStatementUpload: original columns borrower_id, file_path, pdf_password_hash (unused), parsing_status, total_inflows_detected, total_outflows_detected, gambling_transaction_count, fuliza_deduction_count, parsed_at; 11.2b added loan_application_id, original_name, file_size, file_sha256, pdf_password_encrypted, review_status (default awaiting_review, cast StatementReviewStatus), reviewed_by_user_id, reviewed_at, review_notes, flags (json), valid_until (date).
+BorrowerKycDocument: exists, unused by any flow yet.
+StatementIntakeService and StatementReviewService as described in section 3.
+MpesaB2cDisbursement (table mpesa_b2c_disbursements): loan_id, originator_conversation_id (unique, nullable), conversation_id, transaction_id (unique, nullable), recipient_phone, amount, status (default 'initiated'; values initiated/successful/failed), response_code, response_description, disbursed_at.
+MakerCheckerRequest: fillable maker_user_id, action_type, target_entity_type, target_entity_id, payload (array), status (pending/approved/rejected), checker_user_id, checker_notes, actioned_at. The Review Desk shows payload key/value pairs. In tests, an approved request can be created directly with MakerCheckerRequest::create([...]) (done in ldwSetup).
+MakerCheckerController: index() shows pending (oldest 50) and 10 recent decisions; approve()/reject() call the service and turn RuntimeException messages into a review error.
+Borrower fillable: user_id, full_name, id_number, kra_pin, phone_number, email, credit_limit, risk_band, is_blacklisted. User (final, HasRoles): fillable name, email, password (hashed cast, pass plain text), phone_number, is_active.
+audit_trails: user_id nullable FK, action (100), auditable_type (100, NOT NULL), auditable_id (NOT NULL), old_values/new_values json nullable, ip_address (45, NOT NULL), user_agent (255, NOT NULL), created_at. $timestamps = false. Audit actions in use: LOGIN_SUCCEEDED, LOGIN_FAILED, LOGOUT, LOAN_APPLICATION_SUBMITTED, APPLICATION_INFLOW_UPDATED, APPLICATION_CREDIT_CHECK_RUN, STATEMENT_UPLOADED, STATEMENT_ACCEPTED, STATEMENT_REJECTED, STATEMENT_VIEWED, STATEMENT_PASSWORD_REVEALED, MAKER_CHECKER_AUTHORIZED, MAKER_CHECKER_REJECTED, APPLICATION_SENT_FOR_APPROVAL, APPLICATION_FINAL_APPROVED, APPLICATION_FINAL_REJECTED, MPESA_B2C_DISBURSEMENT_INITIATED, JOURNAL_ENTRY_POSTED, PAYMENT_WATERFALL_EXECUTED, and new this session: LOAN_CREATED, LOAN_DISBURSEMENT_SIMULATED, LOAN_FEE_CHARGED, LOAN_FEE_CHARGE_FAILED.
+mpesa_c2b_callbacks has a unique index on trans_id.
+FairCollectionsService constants: LEGAL_HOUR_START = 8, LEGAL_HOUR_END = 18, COOLDOWN_HOURS = 48.
+OutboxEvent: hash-chained (previous_event_hash, current_event_hash = sha256 of prev + event name + json payload); loan.disbursed and loan.settled events exist.
+Architecture decisions and reasons (11.2 to 11.4c)
+Statements only propose; humans decide. Software cannot prove a PDF is genuine. Automated checks produce flags; a credit officer decides, writes a note when flags exist, and is named in the audit trail. Never auto-blacklist someone on a forgery flag (Data Protection Act, CBK digital-credit fairness).
+Flags are staff-only so the borrower is not tipped off and no other borrower’s data leaks.
+Documents are visible only to people who decide on them (lender_admin, credit_officer). Finance can see the page but not the PDF or the password.
+The PDF password is stored encrypted and erased on decision.
+Rule 4’s figure comes from the accepted statement (staff type the verified average monthly inflow); statements are tied to one application and valid 30 days.
+Rejecting a statement keeps the application pending; rejecting at the credit-check stage rejects the application.
+Two-person approval (11.3): the maker can never decide their own request; approval refuses unless the application is still approved_pending_checker.
+Money-out separation of duties (11.4b): the credit officer who builds a case cannot send the money; only finance officers and lender admins can. ⚠️ A lender admin can both approve (as second approver, if not the maker) and send money; no rule prevents the same admin doing both steps. Raise with the user if tighter control is wanted.
+Whole-shilling principal, rounded down (11.4a): M-Pesa B2C sends whole shillings and the ledger must equal what was actually sent.
+Never lose a disbursement over a fee (11.4c): the fee runs in a savepoint and is allowed to fail; the loan is still recorded as disbursed.
+Check the ledger before sending money (11.4c): missing GL accounts block the payout up front.
+Simulation is local/testing only and also audited.
+Design system: forest-green theme (brand-50/100/500/600/700/900, paper, ink, line, muted), system font stack, flat 1px-border cards, tabular-nums for money, plain-English copy. Safe layout for new lender pages: wrap in <x-layouts.lender title="...">, don’t print another <h1>, don’t add padding classes to <x-card>. The lender layout nav array has per-item roles filtered by hasAnyRole(); add new items there. The borrower layout is mobile-first (max-w-md, bottom tabs).
+Seeded demo data (local only): password Demo@12345. Accounts: admin@ (Grace Njeri, lender_admin), credit@ (Peter Otieno), collections@ (Mary Achieng), finance@ (John Kamau), borrower@ethical-lending.test (Amina Wanjiku, phone 254700000010, ID 12345678, limit 15,000), all @ethical-lending.test. Staff phones 254700000001 to 254700000004. DemoLoanSeeder creates defaulted loan LN-DEMO-001 (owed 16,700.00, product BMC-30). DemoCollectionsSeeder adds LN-DEMO-002 (Baraka Mwangi, frozen at cap 12,000) and LN-DEMO-003 (Amani Otieno, promise to pay KES 2,500). LoanProductSeeder (idempotent via firstOrCreate) creates product ETH-QUICK30 “Quick Cash 30”: KES 1,000 to 20,000, 30 days, reducing_balance, interest rule “Standard” 18.00% annual / 1.50 monthly, fee “Processing fee” 5% with excise applicable. ⚠️ Products BMC-30 and DEMO-30 (created by the demo seeders) have no interest rule or fee rows, so originating a loan on them fails with “This product has no interest rate set up.” Only ETH-QUICK30 works end to end. Never run demo seeders on a live database.
+6. USER PROFILE & INTERACTION RULES
+
+Who: Thumbi, building this in Kenya on a Windows 10 laptop with XAMPP and VS Code (slow laptop, about 2 Mbps internet). Fourth-year Applied Computer Science student at Egerton University. A capable developer who follows instructions precisely, pastes outputs and screenshots back, and has worked with several AI agents on this project (which is why older dossiers disagreed with reality). He also tracks other work (RecurTrack final-year project, university admin matters); none of that belongs in this project. He uses a free Claude plan (five-hour usage window) and asked how to see his usage; he has many browser tabs open including Gemini and Kimi. Replies are often one line (“green”, “fixed”, “yes”, “everything passed”, or just a pasted test summary), and messages are informal with typos. He once typed npm build instead of npm run build, so spell out exact commands. When asked to choose between options he said “choose the best way, you know better”: make the call, state assumptions, let him object. When he does choose (he picked fee option 2 and declined the happy-path button), follow it. When one reply answers two questions with a single “yes”, accept it but ask separately next time if the answers could differ. He is direct and a little impatient with theory, and he thinks like a lender. Answer challenges honestly and concisely; don’t be defensive.
+
+Standing preferences (apply without being reminded):
+
+Direct, practical, concise, plain-English communication; real-world relevance over abstract or technical framing; step-by-step, action-oriented help.
+Deliver code as individual files, each in its own code block with the exact path above it. Never a single deploy_step_X_X.php script.
+Give the php artisan make:... command first, then the full file; tell the user to replace the whole generated file. (He asked this session: “create the php artisan make for all the files i have to create”, so list every make command for new files up front, one per code block.)
+Complete files only: no // rest of class, no placeholders, no truncation.
+For every file give a short note: phase/sub-step, path, what it does, why it matters (including Kenyan fintech/legal context).
+Start with a brief “what we’re building” before code.
+FormRequests: authorize() always returns true (the generator’s default false caused 403 failures twice). Remind the user each time you give one.
+Tests: uses(TestCase::class, RefreshDatabase::class); at the top; $this->withoutVite(); for pages; unique global helper names.
+Money: BCMath strings in logic; number_format((float) $v, 2) for display only.
+Windows constraint: never give huge or multi-line cmd commands. Give commands one per code block.
+Files you have not seen: never guess columns. Ask for the migrations or services you need and give a cmd command that dumps them into one text file; the user opens it with code files_for_X.txt and pastes. Give the del line and the for line as two separate code blocks. Pattern that works:
+del files_for_X.txt 2>nul
+for %f in (path\one.php path\two.php) do (echo ===== %f ===== & type %f) >> files_for_X.txt
+
+If any name is wrong cmd just says “cannot find the file” and carries on; ask which one. Wildcards work in the list (for example app\Models\*Kyc*.php).
+
+End every reply with exactly what the user should run or paste next, with expected test counts.
+Tone: friendly, direct, steady. Use ## headings sparingly, short bold labels. When declining something, no bullets.
+
+⚠️ Hard lesson, now four occurrences: files in long multi-file replies get missed or mangled.
+
+The StatementReviewStatus enum was not created.
+The gated ApplicationReviewService was not saved.
+The new ApplicationQueueController (11.3) was not saved (9 of 10 tests failed).
+In 11.4b, the application-disbursement-panel.blade.php was left as the make:view stub (3 view tests failed).
+
+Also, a partial “one-line edit” to apply.blade.php was once mis-applied, causing a Blade “expecting endif” 500 error.
+
+Therefore:
+
+Prefer whole-file replacement over “find this and edit it” instructions, especially for Blade views and controllers.
+After delivering several files, give a short verification list (one findstr per important file) and ask the user to run it BEFORE running tests.
+When a test says “Class not found”, “undefined method”, or shows the old behaviour (or the rendered page ends with a stray stub comment), suspect an unsaved or mis-named file first.
+“Nothing changed in the browser” is usually a stale Vite build (npm run build, hard refresh, check public\hot doesn’t exist) or an unsaved file.
+
+When to ask vs proceed. Proceed when you have the schema; ask only when a missing file or business rule would force a guess. When the user says “don’t do anything yet”, only read and summarise. Do not build on an unverified step: get test output first. When the user reports only “green” or “everything passed”, accept it but flag that you hadn’t seen the numbers; ask for the summary line when counts matter. Expensive or hard-to-reverse decisions (like the fee treatment) deserve a short question with a recommendation; he answers quickly.
+
+Handling mistakes. The user reports failures by pasting full test output (often huge stack traces). Ask for only the FAILED lines and the first error. Diagnose the single root cause, give the exact fix (whole-file replacement when small), and say what result to expect. Own errors plainly without over-apologising. Say whether the bug is in the app or in your test (the 419 production-test bug was mine).
+
+Things the earlier agents and I got wrong (so you do not repeat them):
+
+Called the Log [fintech] is not defined error a harmless red herring without verifying.
+Rebuilt borrower/apply.blade.php and ApplicationController without seeing BorrowerApplyTest; it happened to pass. Verify when you touch pages other tests cover.
+Wrote a confusing expected test count once (204 then 203).
+Told the user the second approver’s rejection note would be shown to the borrower, then changed it to a fixed message. Decide first, then say it once.
+Gave “edit one line” instructions that were mis-applied.
+Wrote a production-environment test that tripped CSRF (419) instead of testing the guard.
+Initially seeded only two ledger accounts when the GL code posts to six; found it only after the user’s file dump. Read the code that consumes a seeder’s output before writing the seeder.
+7. HISTORY & CONTEXT
+
+The old dossiers were unreliable. Earlier handoffs disagreed with each other and the disk. Always trust fresh tree listings, pasted files and test output over any document, including this one if it disagrees with fresh evidence.
+
+THE DATA-LOSS INCIDENT (read carefully).
+
+What happened: on 18 Oct about 12:49 the user noticed that all rows in ethical_lending (users, roles, borrowers, loans) were gone. phpMyAdmin showed empty borrowers. The tables and the migrations table were intact.
+Cause (confirmed): a LoanLockingMysqlTest cleanup looped over Schema::getTableListing() and truncated every table except migrations. On this Laravel version that method returns tables from every database on the MySQL server (the user’s count was 174 versus 62 expected; names like 6766.crimes). The only guard checked that the connected database name ended in _test, which passed. So the 10.5 lock-test runs (about 05:47 and 11:54 EAT on 18 Oct) emptied ethical_lending and also 6766 and acmp490 (the user’s other project databases, apparently datasets such as heart_disease_uci, moviedb, crimes). recurtrack_db and phpmyadmin were not shown as empty; ⚠️ never verified. The user said “forget about my other database sets”; honour that, but if asked, the realistic recovery is re-importing from their original CSV/SQL files or XAMPP’s mysql\backup folder.
+Fix: LoanLockingMysqlTest.php now uses mlkEmptyTestDatabase(), which reads information_schema.tables WHERE table_schema = <current db> AND table_type = 'BASE TABLE', aborts unless the database name ends in _test, and disables FK checks around TRUNCATE TABLE. Committed as 5e094e4. ⚠️ Not yet run on MySQL after the fix.
+Second guard: the tests\TestCase.php replacement (confirmed saved).
+Lesson: never write test cleanup that enumerates tables through a Laravel schema helper without checking its scope; always scope by the current schema, and always assert the database name before any destructive statement. Do not run MySQL-configured tests until the user is comfortable; if they do, run --filter=LoanLockingMysqlTest first and check that row counts in ethical_lending (SELECT COUNT(*) FROM users) are unchanged afterwards. The user’s MySQL server also hosts other projects’ databases (6766, acmp490, recurtrack_db, phpmyadmin), which must never be touched.
+
+Other history and dead ends.
+
+Deployer script rejected: the one-big-PHP-script workaround was used once for 9.1; the user prefers individual files. Dead end; never use.
+9.1 and 9.3 bugs: LoginRequest::authorize() returned false (generator default), then the same in AcceptRestructuringRequest. Fixed.
+9.2: a test failed because it asserted uppercase text that CSS produces.
+9.3: the dashboard first showed “no active loan” because the MySQL data had no loan; DemoLoanSeeder fixed it. Not a bug.
+Stale CSS (9.4): new Tailwind classes didn’t show until npm run build was run correctly and the page hard-refreshed.
+10.3: the single failing test was caused by an unsaved view file. Final: 155/155.
+10.4: tests passed (160); committed as 3b27757; the user was briefly confused that the commit wasn’t on GitHub because it hadn’t been pushed.
+10.5: phpunit.mysql.xml initially “could not be read” because the user had not yet created the file; once created, 27/27 money tests passed on MySQL. Lock tests passed 2/2 (about 144 s each).
+10.5b: the STK branch of processRepayment had no idempotency marker; fixed.
+11 planning: an earlier agent read the underwriting, B2C and application files and re-planned Phase 11 around real code: the engine works on applications (not borrowers), derives limit from the request, rejects everyone with no M-Pesa inflow data, no code created a Loan from an application, the B2C result route was missing, and disbursement had no double-send guard (all now addressed except the items in section 3 risks).
+11.2: 182 passed / 2 skipped. 11.2b: first 187 passed / 5 failed (missing enum file). 11.2c: 202 / 1 failed (unsaved service). 11.2d: 8 of 9 first time; Blade syntax error from a mis-applied edit; then 212/2.
+11.3: first run 9 of 10 failed (unsaved controller); after the fix the user reported all passing.
+11.4a: user reported all passing (expected 234/2, not shown).
+11.4b: first run 4 failed / 9 passed: three view tests because the panel file was still the make:view stub, one because my production test hit CSRF (419). After fixing both, 247 passed, 2 skipped (936 assertions). Browser check then showed the Money out card working.
+11.4c: delivered at the end of this session; not run yet.
+
+Decisions the user explicitly approved or accepted.
+
+Login by email or phone plus password; the green design direction; the borrower portal design; maker-checker approver roles and collections-viewer roles (assumed, never objected); the Phase 10 order (delegated); signing in a borrower straight after sign-up with a password chosen at registration (assumed); the Phase 11 ordering; moving README and final gate to the end of Phase 11.
+Statement upload with staff review and a validity concept (his own idea; the design was proposed with “tell me if you object”, he proceeded; accepted in practice ⚠️ never an explicit “yes”).
+The 11.2d timeline and the 11.3 design were announced and he proceeded.
+The 11.4 split into 11.4a/11.4b was announced; he proceeded.
+Explicit this session: fee option 2 (“i like option 2”: add the fee to the balance). He said “there is no need for the happy path” (no “create loan only” demo button). He confirmed .env is not tracked and that the new files were pushed.
+
+Explicitly rejected: the deployer script, and the “create loan only” demo happy-path button. Nothing else was rejected.
+
+8. EVERYTHING ELSE
+
+Brainstorm for borrower experience (proposed, not agreed).
+
+Tiered rigor: first loan, small amount (say up to KES 1,000-2,000): light checks (ID, phone OTP, consent, CRB) and a statement only above that; larger amounts need statements; repeat borrowers reuse evidence within the 30-day validity window (the borrower’s own repayment history is the best evidence; hard to forge). The user did not agree or object. Do not build without asking.
+SMS on status changes (Africa’s Talking fits), decline explanations with “what you can do next”, queue ageing for staff, optional referee (advised against: the fair-collections rules forbid contacting friends or relatives), selfie/liveness checks (heavy, park for later).
+Forgery signals worth building in 11.2e once the statement format is known: running-balance arithmetic per row; name and phone match; freshness and ≥3-month coverage; duplicate file hash (done) or duplicate receipt numbers across borrowers; PDF metadata (creator/producer) as a flag, not a verdict; suspicious patterns (round or very regular amounts, large deposit right before the end). Stronger options to investigate (not verified, treat as research): consent-based account-aggregation providers, and checking what Safaricom offers lenders; the lender’s own paybill repayment history is hard to forge.
+
+Phase 12 ideas (raised with the user, not agreed).
+
+Operations UI: borrower detail and list pages for staff; loan ledger and GL views; reports and exports pages (CBK returns, CRB Metro 2, IFRS 9 provisions).
+Proof against real M-Pesa: Safaricom sandbox with a public HTTPS callback URL (ngrok), MPESA_STK_CALLBACK_URL, B2C initiator_name and security_credential, callback IP allow-listing, a timeout-resolution screen and a reconciliation job for payouts stuck in initiated.
+Production running: queue worker, scheduler for interest accrual and collections, backups, error monitoring, deployment setup.
+Staff security: 2FA for staff, password reset, session timeout.
+Optional: SMS OTP login or invite flow for borrowers; staff uploading an M-Pesa statement for the parser instead of typing inflow; per-action-type maker-checker executors; statement retention job and file clean-up; a rule that the same person cannot both approve an application and send its money.
+
+Gotchas and quirks.
+
+STK Push accepts whole shillings only; “Pay everything” rounds up and extra cents become overpayment credit. The Safaricom sandbox doesn’t prompt real phones.
+The B2C Amount is (int) round((float) principal_disbursed); origination already guarantees a whole-shilling principal, so no rounding surprise.
+Role middleware uses the class name with a parameter string; there is no role alias.
+Tailwind v4 has no text-2xs/text-3xs unless defined in @theme.
+Every new Blade view with new Tailwind classes needs npm run build before it looks right in the browser (tests don’t need it because of withoutVite()).
+The laptop clock sometimes shows hours outside Kenyan office time, so the collections banner correctly said “Outside legal hours”. Not a bug.
+Spatie’s hasAnyRole() accepts an array; the lender layout and the approval panel use it.
+The workbench shows only the 100 most overdue cases (Review Desk the oldest 50 pending) with a “showing X of Y” note. Laravel’s default pagination links were avoided on purpose.
+With no CRB record the underwriting engine assumes credit score 600 (band C, 75% limit). This is why the screenshot application got KES 1,125 of a KES 1,500 request.
+The borrower dashboard x-repayment-form only shows for statuses disbursed, defaulted, restructured; a loan in approval_hold shows a “pending/approval hold” badge with tone warning.
+LoanApplication status default in the migration is submitted, but the apply page sets pending; the engine and maker-checker use approved_pending_checker / approved / rejected. Keep status strings consistent (prefer constants).
+BorrowerOnboardingService::register() creates a login only if a password is supplied, with placeholder email 2547XXXXXXXX@borrowers.ethical-lending.invalid when none given.
+valid_until is a date cast; compare with whereDate('valid_until', '>=', now()->toDateString()).
+The Apply page statement card only shows for an open application; the upload form shows only when the application is pending and the statement is not yet accepted.
+After a second approver’s rejection, the borrower’s Apply page shows “Your last application was not approved: This application did not pass final review.” and lets them apply again.
+The staff show page’s “Money out” card is only rendered when the application status is approved or a loan exists.
+Windows findstr is available for quick checks; MySQL CLI at C:\xampp\mysql\bin\mysql -u root.
+Git commit history is coarse (one big commit through 10.4). From here, suggest one commit per step.
+Claude memory is not enabled for this user, so there is no memory file to read. Trust fresh evidence.
+Product facts to repeat if asked: free-plan usage is a session-based limit that resets every five hours; Anthropic’s help pages say Claude notifies you when you reach it. I could not confirm an official usage meter on the free plan; one third-party guide says the Settings, Usage page is empty for free accounts since August 2026 (unverified).
+
+Things the user mentioned once that may matter later. They track progress by pasting full test output and screenshots; they like a brief “what we’re building” before code; their GitHub username begins “paulthumb...” ⚠️; they use Chrome with many tabs including Gemini and Kimi (they have used other AI tools on this project); their internet is slow (about 2 Mbps), so keep downloads and dumps small.
+
+Your first message to the user should
+Briefly acknowledge the handoff and say 11.4a/11.4b are verified (247 passed, 2 skipped) and pushed, and that 11.4c (fee added to balance) is delivered but not yet run.
+Ask for the five findstr results, php artisan view:clear, php artisan test --filter=LoanFeeTest (expect 11 passed), then php artisan test (expect 258 passed, 2 skipped), one command per block. If any findstr prints nothing, resend that file immediately.
+Ask them to confirm php artisan db:seed --class=ChartOfAccountSeeder was run on the real database, and (after green) to commit and push 11.4c.
+Re-ask once, briefly: the statement header line plus one fake transaction row (and whether the PDF needs a password), and whether this is coursework, a portfolio piece or a real product.
+Then state the 11.5 plan from section 3 and proceed, starting with the files you need to see (ask for them with the dump pattern before touching borrower/apply.blade.php, ApplicationController, BorrowerApplyTest or RestructuringEngine).

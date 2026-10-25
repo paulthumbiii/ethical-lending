@@ -324,8 +324,10 @@
                     <p class="mt-3 text-sm text-muted">{{ $application->rejection_reason }}</p>
                 @endif
             @endif
-                    </x-card>
+        </x-card>
 
         <x-application-approval-panel :application="$application" :latest-request="$latestApprovalRequest" :can-raise="$canRaiseApproval" />
+
+        <x-application-disbursement-panel :application="$application" :loan="$loan" :disbursement="$latestDisbursement" :can-disburse="$canDisburse" :can-simulate="$canSimulate" />
     </div>
-</x-layouts.lender>  
+</x-layouts.lender>
