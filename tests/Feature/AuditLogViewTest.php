@@ -71,7 +71,7 @@ it('shows who, action, entity and IP but never old values, new values or user ag
         ->get('/lender/audit')
         ->assertOk()
         ->assertSee($actor->email)
-        ->assertSee('Loan fee charged')
+        ->assertSee('Loan Fee Charged')
         ->assertSee('Loan #7')
         ->assertSee('10.1.2.3')
         ->assertDontSee('OLDVALUE123')

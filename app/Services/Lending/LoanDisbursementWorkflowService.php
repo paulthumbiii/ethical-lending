@@ -7,6 +7,8 @@ namespace App\Services\Lending;
 use App\Enums\LoanStatus;
 use App\Models\AuditTrail;
 use App\Models\Loan;
+use App\Models\LoanApplication;
+use App\Models\MakerCheckerRequest;
 use App\Models\MpesaB2cDisbursement;
 use App\Services\Financial\Mpesa\B2cDisbursementService;
 use Illuminate\Support\Facades\DB;
@@ -15,6 +17,8 @@ use RuntimeException;
 
 final class LoanDisbursementWorkflowService
 {
+    public const FINAL_APPROVER_MESSAGE = 'You gave the final approval on this application, so someone else must send the money.';
+
     public function __construct(
         private readonly LoanOriginationService $origination,
         private readonly B2cDisbursementService $b2c,
@@ -30,11 +34,39 @@ final class LoanDisbursementWorkflowService
     }
 
     /**
+     * The user who gave the final (second) approval, or null if none is recorded.
+     */
+    public function finalApproverId(int $applicationId): ?int
+    {
+        $checkerId = MakerCheckerRequest::query()
+            ->where('action_type', 'APPROVE_LOAN_APPLICATION')
+            ->where('target_entity_type', LoanApplication::class)
+            ->where('target_entity_id', $applicationId)
+            ->where('status', 'approved')
+            ->latest('id')
+            ->value('checker_user_id');
+
+        return $checkerId === null ? null : (int) $checkerId;
+    }
+
+    /**
+     * Two-person control: whoever gave the final approval may not also send the money.
+     */
+    private function assertNotFinalApprover(int $applicationId, int $userId): void
+    {
+        if ($this->finalApproverId($applicationId) === $userId) {
+            throw new RuntimeException(self::FINAL_APPROVER_MESSAGE);
+        }
+    }
+
+    /**
      * Creates the loan if needed, then asks M-Pesa to send the money.
      * Pressing again after a failed attempt resumes with the same loan.
      */
     public function disburse(int $applicationId, int $userId, string $ip, string $userAgent): MpesaB2cDisbursement
     {
+        $this->assertNotFinalApprover($applicationId, $userId);
+
         $loan = Loan::query()->where('loan_application_id', $applicationId)->first();
 
         if ($loan === null) {
@@ -65,6 +97,8 @@ final class LoanDisbursementWorkflowService
         if (! self::simulationAllowed()) {
             throw new RuntimeException('Simulated results are only available on a local test setup.');
         }
+
+        $this->assertNotFinalApprover($applicationId, $userId);
 
         $loan = Loan::query()->where('loan_application_id', $applicationId)->first();
 

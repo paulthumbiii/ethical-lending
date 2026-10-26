@@ -41,7 +41,7 @@ function ldwUser(UserRole $role, string $n): User
 }
 
 /**
- * @return array{application: LoanApplication, credit: User, finance: User, admin: User}
+ * @return array{application: LoanApplication, credit: User, finance: User, admin: User, checker: User}
  */
 function ldwSetup(string $status = 'approved'): array
 {
@@ -51,6 +51,8 @@ function ldwSetup(string $status = 'approved'): array
     $credit = ldwUser(UserRole::CreditOfficer, '01');
     $finance = ldwUser(UserRole::FinanceOfficer, '02');
     $admin = ldwUser(UserRole::LenderAdmin, '03');
+    // The person who gave the final approval. Never one of the senders above.
+    $checker = ldwUser(UserRole::LenderAdmin, '04');
 
     $borrower = Borrower::create([
         'full_name'      => 'Ldw Borrower',
@@ -96,13 +98,13 @@ function ldwSetup(string $status = 'approved'): array
             'target_entity_id'   => $application->id,
             'payload'            => ['application_number' => 'APP-LDW-01'],
             'status'             => 'approved',
-            'checker_user_id'    => $finance->id,
+            'checker_user_id'    => $checker->id,
             'checker_notes'      => null,
             'actioned_at'        => now(),
         ]);
     }
 
-    return ['application' => $application, 'credit' => $credit, 'finance' => $finance, 'admin' => $admin];
+    return ['application' => $application, 'credit' => $credit, 'finance' => $finance, 'admin' => $admin, 'checker' => $checker];
 }
 
 function ldwFakeDaraja(): void
@@ -307,4 +309,40 @@ it('shows that the money was sent once the payout is complete', function (): voi
         ->get(ldwUrl('lender.applications.show', $s['application']))
         ->assertOk()
         ->assertSee('Money sent to the borrower.');
+});
+
+it('stops the final approver from sending the money', function (): void {
+    ldwFakeDaraja();
+    $s = ldwSetup();
+    MakerCheckerRequest::query()->update(['checker_user_id' => $s['admin']->id]);
+
+    $this->actingAs($s['admin'])
+        ->post(ldwUrl('lender.applications.disburse', $s['application']))
+        ->assertSessionHasErrors('review');
+
+    expect(ldwLoan($s['application']))->toBeNull();
+});
+
+it('stops the final approver from simulating the payout', function (): void {
+    $s = ldwSetup();
+    $loan = app(LoanOriginationService::class)->originate($s['application']->id, $s['finance']->id, '127.0.0.1', 'Pest');
+    MakerCheckerRequest::query()->update(['checker_user_id' => $s['admin']->id]);
+
+    $this->actingAs($s['admin'])
+        ->post(ldwUrl('lender.applications.simulate-payout', $s['application']))
+        ->assertSessionHasErrors('review');
+
+    expect($loan->fresh()->status)->toBe(LoanStatus::APPROVAL_HOLD);
+});
+
+it('replaces the send button with an explanation for the final approver', function (): void {
+    $this->withoutVite();
+    $s = ldwSetup();
+    MakerCheckerRequest::query()->update(['checker_user_id' => $s['admin']->id]);
+
+    $this->actingAs($s['admin'])
+        ->get(ldwUrl('lender.applications.show', $s['application']))
+        ->assertOk()
+        ->assertSee('You gave the final approval')
+        ->assertDontSee('Create loan and send money');
 });

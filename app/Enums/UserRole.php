@@ -73,6 +73,24 @@ enum UserRole: string
     }
 
     /**
+     * Roles allowed to record a promise to pay on a collection case.
+     *
+     * @return list<string>
+     */
+    public static function promiseRecorders(): array
+    {
+        return [
+            self::LenderAdmin->value,
+            self::CollectionsOfficer->value,
+        ];
+    }
+
+    public static function promiseRecordersPipe(): string
+    {
+        return implode('|', self::promiseRecorders());
+    }
+
+    /**
      * Roles allowed to enter verified inflow and run credit checks.
      *
      * @return list<string>

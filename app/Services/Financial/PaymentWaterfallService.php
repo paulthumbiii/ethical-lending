@@ -10,6 +10,7 @@ use App\Models\AuditTrail;
 use App\Models\Loan;
 use App\Models\LoanLedgerEntry;
 use App\Models\OutboxEvent;
+use App\Services\Servicing\AmortizationScheduleService;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -123,6 +124,14 @@ final class PaymentWaterfallService
                 'overpayment_amount'      => $overpaymentCredit,
                 'created_at'              => CarbonImmutable::now(),
             ]);
+
+            // Step 10b: Mark the oldest unpaid instalments (bookkeeping only; never throws)
+            app(AmortizationScheduleService::class)->applyPayment(
+                $lockedLoan->id,
+                $allocatedFees,
+                $allocatedInterest,
+                $allocatedPrincipal
+            );
 
             // Step 11: Check for full loan settlement
             $isSettled = bccomp($newTotalBalance, '0.00', 2) === 0;

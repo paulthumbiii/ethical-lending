@@ -15,6 +15,7 @@ use App\Http\Controllers\ContractVerificationController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\Lender\ApplicationQueueController;
 use App\Http\Controllers\Lender\BorrowerController;
+use App\Http\Controllers\Lender\CollectionCaseController;
 use App\Http\Controllers\Lender\CollectionsWorkbenchController;
 use App\Http\Controllers\Lender\LoanController;
 use App\Http\Controllers\Lender\LoanDisbursementController;
@@ -101,12 +102,21 @@ Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::staffPipe()])
                 Route::post('/{makerCheckerRequest}/reject', [MakerCheckerController::class, 'reject'])->name('reject');
             });
 
-        // Collections and in-duplum workbench: read-only (GET only, by design).
+        // Collections workbench list is read-only (GET only). The case page is read-only for
+        // viewers; only promise recorders can post a promise to pay (Phase 14.4b).
         Route::middleware(RoleMiddleware::class . ':' . UserRole::collectionsViewersPipe())
             ->prefix('collections')
             ->name('collections.')
             ->group(function () {
                 Route::get('/', [CollectionsWorkbenchController::class, 'index'])->name('index');
+                Route::get('/{collectionCase}', [CollectionCaseController::class, 'show'])->name('show');
+
+                Route::middleware(RoleMiddleware::class . ':' . UserRole::promiseRecordersPipe())
+                    ->group(function () {
+                        Route::post('/{collectionCase}/promises', [CollectionCaseController::class, 'storePromise'])
+                            ->middleware('throttle:20,1')
+                            ->name('promises.store');
+                    });
             });
     });
 
@@ -122,7 +132,7 @@ Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::Borrower->val
         Route::post('/loans/{loan}/pay', [PaymentController::class, 'store'])->middleware('throttle:6,1')->name('payment.store');
     });
 
-    Route::middleware([
+Route::middleware([
     'auth',
     \Spatie\Permission\Middleware\RoleMiddleware::class . ':' . \App\Enums\UserRole::staffPipe(),
     \Spatie\Permission\Middleware\PermissionMiddleware::class . ':finance.view',
@@ -133,7 +143,7 @@ Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::Borrower->val
         Route::get('/', [\App\Http\Controllers\Lender\FinanceController::class, 'index'])->name('index');
     });
 
-    Route::middleware([
+Route::middleware([
     'auth',
     \Spatie\Permission\Middleware\RoleMiddleware::class . ':' . \App\Enums\UserRole::staffPipe(),
     \Spatie\Permission\Middleware\PermissionMiddleware::class . ':audit.view',
@@ -142,4 +152,65 @@ Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::Borrower->val
     ->name('lender.audit.')
     ->group(function (): void {
         Route::get('/', [\App\Http\Controllers\Lender\AuditLogController::class, 'index'])->name('index');
+    });
+
+Route::middleware([
+    'auth',
+    \Spatie\Permission\Middleware\RoleMiddleware::class . ':' . \App\Enums\UserRole::Borrower->value,
+])
+    ->prefix('borrower')
+    ->name('borrower.')
+    ->group(function (): void {
+        Route::get('/account', [\App\Http\Controllers\Borrower\AccountController::class, 'show'])->name('account');
+    });
+
+Route::middleware([
+    'auth',
+    \Spatie\Permission\Middleware\RoleMiddleware::class . ':' . \App\Enums\UserRole::staffPipe(),
+    \Spatie\Permission\Middleware\PermissionMiddleware::class . ':' . \App\Enums\StaffPermission::StatementsView->value,
+])
+    ->prefix('lender/borrowers/{borrower}/documents')
+    ->name('lender.borrowers.documents.')
+    ->group(function (): void {
+        Route::get('/{document}/file', [\App\Http\Controllers\Lender\KycDocumentController::class, 'file'])->name('file');
+        Route::post('/{document}/verify', [\App\Http\Controllers\Lender\KycDocumentController::class, 'verify'])->name('verify');
+        Route::post('/{document}/reject', [\App\Http\Controllers\Lender\KycDocumentController::class, 'reject'])->name('reject');
+    });
+
+Route::middleware([
+    'auth',
+    \Spatie\Permission\Middleware\RoleMiddleware::class . ':' . \App\Enums\UserRole::Borrower->value,
+])
+    ->prefix('borrower')
+    ->name('borrower.')
+    ->group(function (): void {
+        Route::post('/account/documents', [\App\Http\Controllers\Borrower\KycDocumentController::class, 'store'])
+            ->middleware('throttle:10,1')
+            ->name('documents.store');
+    });
+
+Route::middleware([
+    'auth',
+    \Spatie\Permission\Middleware\RoleMiddleware::class . ':' . \App\Enums\UserRole::Borrower->value,
+])
+    ->prefix('borrower')
+    ->name('borrower.')
+    ->group(function (): void {
+        Route::get('/loans/{loan}/contract', [\App\Http\Controllers\Borrower\ContractController::class, 'show'])
+            ->middleware('throttle:20,1')
+            ->name('contract');
+    });
+
+Route::middleware([
+    'auth',
+    \Spatie\Permission\Middleware\RoleMiddleware::class . ':' . \App\Enums\UserRole::Borrower->value,
+])
+    ->prefix('borrower')
+    ->name('borrower.')
+    ->group(function (): void {
+        Route::get('/notifications', [\App\Http\Controllers\Borrower\NotificationController::class, 'index'])
+            ->name('notifications');
+        Route::post('/notifications/read', [\App\Http\Controllers\Borrower\NotificationController::class, 'readAll'])
+            ->middleware('throttle:20,1')
+            ->name('notifications.read');
     });

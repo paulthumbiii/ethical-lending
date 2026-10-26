@@ -13,11 +13,14 @@ use App\Models\OutboxEvent;
 use App\Services\Servicing\ContractGeneratorService;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 uses(TestCase::class, RefreshDatabase::class);
 
 beforeEach(function (): void {
+    Storage::fake('local');
+
     $this->borrower = Borrower::create([
         'full_name'      => 'Wanjiku Kamau',
         'id_number'      => '28471928',
@@ -69,9 +72,8 @@ it('generates a tamper-proof contract with cryptographic sha256 hash and qr code
     expect($contract)->toBeInstanceOf(LoanLegalContract::class)
         ->and($contract->contract_sha256_hash)->toHaveLength(64)
         ->and($contract->qr_verification_code)->toStartWith('VER-')
-        ->and(file_exists(storage_path('app/' . $contract->contract_pdf_path)))->toBeTrue();
+        ->and(Storage::disk('local')->exists($contract->contract_pdf_path))->toBeTrue();
 
-    // Verify Outbox Event created
     $outbox = OutboxEvent::where('event_name', 'contract.generated')->first();
     expect($outbox)->not->toBeNull()
         ->and($outbox->payload['loan_number'])->toBe('LN-DOC-01');

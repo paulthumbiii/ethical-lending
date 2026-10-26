@@ -8,55 +8,86 @@ use App\Models\AuditTrail;
 use App\Models\Loan;
 use App\Models\LoanLegalContract;
 use App\Models\OutboxEvent;
+use App\Services\Lending\LoanFeeService;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 final class ContractGeneratorService
 {
-    /**
-     * Generates a tamper-proof loan contract and Key Facts Statement (KFS) with SHA-256 hash.
-     */
-    public function generateContract(Loan $loan): LoanLegalContract
+    public function __construct(private readonly LoanFeeService $fees)
     {
-        return DB::transaction(function () use ($loan): LoanLegalContract {
+    }
+
+    /**
+     * Returns the loan's contract, generating it the first time.
+     * Calling it again returns the same contract (same QR code and hash),
+     * unless the stored file has gone missing or $force is true.
+     */
+    public function generateContract(Loan $loan, bool $force = false): LoanLegalContract
+    {
+        return DB::transaction(function () use ($loan, $force): LoanLegalContract {
             $lockedLoan = Loan::query()
                 ->where('id', $loan->id)
-                ->with(['borrower', 'product', 'amortizationSchedules'])
+                ->with(['borrower', 'product'])
                 ->lockForUpdate()
                 ->firstOrFail();
+
+            if (! $force) {
+                $existing = LoanLegalContract::query()->where('loan_id', $lockedLoan->id)->first();
+
+                if ($existing !== null && Storage::disk('local')->exists((string) $existing->contract_pdf_path)) {
+                    return $existing;
+                }
+            }
 
             $now = CarbonImmutable::now();
             $borrower = $lockedLoan->borrower;
             $product = $lockedLoan->product;
 
-            // 1. Calculate Statutory Key Facts Statement (KFS) Metrics
             $principal = (string) $lockedLoan->principal_disbursed;
             $annualRate = (string) $lockedLoan->annual_interest_rate;
             $tenureDays = (int) $lockedLoan->tenure_days;
 
-            // Simple Interest = Principal * (Rate / 100) * (TenureDays / 365)
-            $interestOwed = bcmul(
-                $principal,
-                bcmul(bcdiv($annualRate, '100.00', 4), bcdiv((string) $tenureDays, '365.00', 4), 4),
+            // Estimated simple interest = principal x rate% x days / 365, divided last so nothing is cut early.
+            $interestOwed = bcdiv(
+                bcmul(bcmul($principal, $annualRate, 6), (string) $tenureDays, 6),
+                '36500',
                 2
             );
 
-            // Processing Fee = 5% of Principal (with 20% KRA Excise Duty)
-            $processingFee = bcmul($principal, '0.05', 2);
-            $exciseDuty = bcmul($processingFee, '0.20', 2);
-            $totalCostOfCredit = bcadd(bcadd($interestOwed, $processingFee, 2), $exciseDuty, 2);
+            // Fees come from the product's fee rules, the same source the ledger uses.
+            // Excise (20%) is part of the fee, not added on top.
+            $fees = $this->fees->quote($lockedLoan);
+            $feeTotal = '0.00';
+            $exciseIncluded = '0.00';
+
+            foreach ($fees as $fee) {
+                $feeTotal = bcadd($feeTotal, $fee['amount'], 2);
+
+                if ($fee['excise']) {
+                    $exciseIncluded = bcadd($exciseIncluded, bcmul($fee['amount'], '0.20', 2), 2);
+                }
+            }
+
+            $totalCostOfCredit = bcadd($interestOwed, $feeTotal, 2);
             $totalRepayable = bcadd($principal, $totalCostOfCredit, 2);
 
-            // Annual Percentage Rate (APR) Approximation
-            $apr = number_format((float) $annualRate + 5.0, 2, '.', '');
+            // Simple effective annual cost: (interest + fees) / principal, scaled from the tenure to a year.
+            $apr = '0.00';
+            if (bccomp($principal, '0', 2) > 0 && $tenureDays > 0) {
+                $apr = bcdiv(
+                    bcmul($totalCostOfCredit, '36500', 6),
+                    bcmul($principal, (string) $tenureDays, 6),
+                    2
+                );
+            }
 
             $qrCode = 'VER-' . strtoupper(Str::random(16));
             $verificationUrl = url('/verify/contract/' . $qrCode);
 
-            // 2. Render Blade Contract Template
             $renderedHtml = view('pdf.loan-contract', [
                 'loan'              => $lockedLoan,
                 'borrower'          => $borrower,
@@ -66,8 +97,9 @@ final class ContractGeneratorService
                 'apr'               => $apr,
                 'tenureDays'        => $tenureDays,
                 'interestOwed'      => $interestOwed,
-                'processingFee'     => $processingFee,
-                'exciseDuty'        => $exciseDuty,
+                'fees'              => $fees,
+                'feeTotal'          => $feeTotal,
+                'exciseIncluded'    => $exciseIncluded,
                 'totalCostOfCredit' => $totalCostOfCredit,
                 'totalRepayable'    => $totalRepayable,
                 'qrCode'            => $qrCode,
@@ -75,20 +107,12 @@ final class ContractGeneratorService
                 'generatedAt'       => $now,
             ])->render();
 
-            // 3. Compute Cryptographic SHA-256 Digest
             $sha256Hash = hash('sha256', $renderedHtml . $lockedLoan->loan_number . $borrower->id_number);
 
-            // 4. Save Contract Artifact to Storage
-            $storageDir = storage_path('app/contracts');
-            if (!File::exists($storageDir)) {
-                File::makeDirectory($storageDir, 0755, true);
-            }
+            // Private disk only: never under public/.
+            $filePath = "contracts/contract_{$lockedLoan->loan_number}_{$now->format('YmdHis')}.html";
+            Storage::disk('local')->put($filePath, $renderedHtml);
 
-            $fileName = "contract_{$lockedLoan->loan_number}_{$now->format('YmdHis')}.html";
-            $filePath = "contracts/{$fileName}";
-            File::put(storage_path("app/{$filePath}"), $renderedHtml);
-
-            // 5. Create or Update LoanLegalContract record
             $contract = LoanLegalContract::updateOrCreate(
                 ['loan_id' => $lockedLoan->id],
                 [
@@ -99,7 +123,6 @@ final class ContractGeneratorService
                 ]
             );
 
-            // 6. Dispatch cryptographically chained Outbox Event
             $prevEvent = OutboxEvent::query()->latest('id')->first();
             $prevHash = $prevEvent ? $prevEvent->current_event_hash : str_repeat('0', 64);
 
@@ -141,7 +164,7 @@ final class ContractGeneratorService
                 'user_agent'     => request()->userAgent() ?? 'System/CLI',
             ]);
 
-            Log::channel('daily')->info(sprintf(
+            Log::channel('fintech')->info(sprintf(
                 'Legal Contract generated for Loan #%s. SHA-256: %s | QR: %s',
                 $lockedLoan->loan_number,
                 $sha256Hash,

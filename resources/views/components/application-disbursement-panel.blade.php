@@ -12,6 +12,10 @@
     $waiting = ! $sent && $disbursement !== null && $disbursement->status === 'initiated';
     $failed = ! $sent && ! $waiting && $disbursement !== null && $disbursement->status === 'failed';
 
+    // Two-person control: the person who gave the final approval cannot also send the money.
+    $isFinalApprover = auth()->id() !== null
+        && app(\App\Services\Lending\LoanDisbursementWorkflowService::class)->finalApproverId((int) $application->id) === (int) auth()->id();
+
     $feeService = app(\App\Services\Lending\LoanFeeService::class);
     $fees = ($loan !== null && ! $sent) ? $feeService->quote($loan) : [];
     $feeTotal = $sent ? $feeService->chargedTotal($loan) : '0.00';
@@ -57,7 +61,7 @@
                 Another payout cannot be started until this one is resolved.
             </p>
 
-            @if ($canSimulate)
+            @if ($canSimulate && ! $isFinalApprover)
                 <form method="POST"
                       action="{{ route('lender.applications.simulate-payout', ['loanApplication' => $application->id]) }}"
                       class="mt-4"
@@ -67,6 +71,8 @@
                             class="rounded-md border border-brand-600 px-4 py-2 text-sm font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-60">Simulate M-Pesa result</button>
                     <p class="mt-2 text-xs text-muted">Local demo only. This pretends Safaricom confirmed the payout. It is not available in production.</p>
                 </form>
+            @elseif ($canSimulate && $isFinalApprover)
+                <p class="mt-3 text-sm text-muted">{{ \App\Services\Lending\LoanDisbursementWorkflowService::FINAL_APPROVER_MESSAGE }}</p>
             @endif
         @else
             @if ($loan !== null)
@@ -102,7 +108,9 @@
                 </p>
             @endif
 
-            @if ($canDisburse)
+            @if ($canDisburse && $isFinalApprover)
+                <p class="mt-3 text-sm text-muted">{{ \App\Services\Lending\LoanDisbursementWorkflowService::FINAL_APPROVER_MESSAGE }}</p>
+            @elseif ($canDisburse)
                 <form method="POST"
                       action="{{ route('lender.applications.disburse', ['loanApplication' => $application->id]) }}"
                       class="mt-4"

@@ -7,6 +7,7 @@ namespace App\Services\Governance;
 use App\Models\AuditTrail;
 use App\Models\LoanApplication;
 use App\Models\MakerCheckerRequest;
+use App\Services\Customer\BorrowerNotificationService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
@@ -100,6 +101,13 @@ final class MakerCheckerService
                     'ip_address' => request()->ip() ?? '127.0.0.1',
                     'user_agent' => request()->userAgent() ?? 'SYSTEM',
                 ]);
+
+                app(BorrowerNotificationService::class)->notify(
+                    (int) $application->borrower_id,
+                    'application_approved',
+                    'Application approved',
+                    'Your loan application was approved. The money will be sent to your M-Pesa once our team releases it.'
+                );
             }
 
             // Record immutable Audit Trail
@@ -186,6 +194,13 @@ final class MakerCheckerService
                     'ip_address' => request()->ip() ?? '127.0.0.1',
                     'user_agent' => request()->userAgent() ?? 'SYSTEM',
                 ]);
+
+                app(BorrowerNotificationService::class)->notify(
+                    (int) $application->borrower_id,
+                    'application_rejected',
+                    'Application not approved',
+                    self::BORROWER_REJECTION_REASON
+                );
             }
 
             AuditTrail::create([

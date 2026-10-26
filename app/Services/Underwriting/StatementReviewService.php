@@ -9,6 +9,7 @@ use App\Models\AuditTrail;
 use App\Models\BorrowerFinancialProfile;
 use App\Models\LoanApplication;
 use App\Models\MpesaStatementUpload;
+use App\Services\Customer\BorrowerNotificationService;
 use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
@@ -92,6 +93,13 @@ final class StatementReviewService
                 'flags_acknowledged' => $flags,
                 'application_id' => $application->id,
             ]);
+
+            app(BorrowerNotificationService::class)->notify(
+                (int) $application->borrower_id,
+                'statement_accepted',
+                'Statement accepted',
+                'A credit officer checked your M-Pesa statement. Your application moves to the next step.'
+            );
         });
     }
 
@@ -128,6 +136,13 @@ final class StatementReviewService
                 'reason' => $reason,
                 'application_id' => $upload->loan_application_id,
             ]);
+
+            app(BorrowerNotificationService::class)->notify(
+                (int) $upload->borrower_id,
+                'statement_rejected',
+                'Please upload your statement again',
+                'We could not accept your M-Pesa statement. Open Apply to see why and upload a new one.'
+            );
         });
     }
 

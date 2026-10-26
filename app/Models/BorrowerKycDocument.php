@@ -10,6 +10,16 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 final class BorrowerKycDocument extends Model
 {
+    /** @var array<string, string> */
+    public const TYPES = [
+        'id_front'            => 'National ID - front',
+        'id_back'             => 'National ID - back',
+        'kra_pin_certificate' => 'KRA PIN certificate (optional)',
+    ];
+
+    /** @var list<string> */
+    public const REQUIRED = ['id_front', 'id_back'];
+
     protected $fillable = [
         'borrower_id',
         'document_type',
@@ -17,6 +27,7 @@ final class BorrowerKycDocument extends Model
         'verification_status',
         'verified_by_user_id',
         'verified_at',
+        'review_notes',
     ];
 
     protected function casts(): array

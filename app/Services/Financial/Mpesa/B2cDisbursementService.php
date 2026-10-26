@@ -10,8 +10,10 @@ use App\Models\Loan;
 use App\Models\LoanLedgerEntry;
 use App\Models\MpesaB2cDisbursement;
 use App\Models\OutboxEvent;
+use App\Services\Customer\BorrowerNotificationService;
 use App\Services\Financial\GeneralLedgerService;
 use App\Services\Lending\LoanFeeService;
+use App\Services\Servicing\AmortizationScheduleService;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -179,6 +181,9 @@ final class B2cDisbursementService
                 // Processing fees are added on top of the principal.
                 $this->chargeFees($loan, $transactionId);
 
+                // Repayment schedule (after fees, so it uses what the ledger really charged).
+                $this->createSchedule($loan);
+
                 // Cryptographically chained Outbox Event
                 $prevEvent = OutboxEvent::query()->latest('id')->first();
                 $prevHash = $prevEvent ? $prevEvent->current_event_hash : str_repeat('0', 64);
@@ -205,6 +210,18 @@ final class B2cDisbursementService
                     'is_published'        => false,
                     'retry_count'         => 0,
                 ]);
+
+                // Tell the borrower. Display-only formatting; a failure here never undoes the payout record.
+                app(BorrowerNotificationService::class)->notify(
+                    (int) $loan->borrower_id,
+                    'loan_disbursed',
+                    'Money sent',
+                    sprintf(
+                        'KES %s was sent to your M-Pesa for loan %s. Open Account to see what you owe and when it is due.',
+                        number_format((float) $loan->principal_disbursed, 2),
+                        $loan->loan_number
+                    )
+                );
             } else {
                 // FAILURE from Safaricom (e.g. Insufficient Utility Balance)
                 $disbursement->update([
@@ -243,6 +260,19 @@ final class B2cDisbursementService
                 'ip_address'     => request()->ip() ?? '127.0.0.1',
                 'user_agent'     => request()->userAgent() ?? 'System/CLI',
             ]);
+        }
+    }
+
+    /**
+     * Builds the repayment schedule in its own savepoint. The money has already gone out,
+     * so a schedule problem is logged and never undoes the payout record.
+     */
+    private function createSchedule(Loan $loan): void
+    {
+        try {
+            DB::transaction(fn () => app(AmortizationScheduleService::class)->generate($loan));
+        } catch (Throwable $e) {
+            Log::channel('fintech')->warning('Schedule not created for loan ' . $loan->loan_number . ': ' . $e->getMessage());
         }
     }
 

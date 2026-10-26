@@ -1,6 +1,3 @@
-<div>
-    <!-- He who is contented is rich. - Laozi -->
-</div>
 @php
     $money = fn ($v): string => 'KES ' . number_format((float) $v, 2);
     $date = fn ($v): string => $v ? \Carbon\CarbonImmutable::parse($v)->format('j M Y') : '-';
@@ -182,11 +179,14 @@
             </div>
         @endforelse
     @else
-        <x-data-table :headings="['No.', 'Due', 'Principal', 'Interest', 'Fees', 'Instalment', 'Status']"
+        <x-data-table :headings="['No.', 'Due', 'Principal', 'Interest', 'Fees', 'Instalment', 'Paid', 'Status']"
                       :is-empty="$rows->isEmpty()"
                       empty-title="No schedule yet"
-                      empty-text="Instalment schedules are created at payout in a later phase.">
+                      empty-text="A schedule is created when the money is sent. Older loans may have none.">
             @foreach ($rows as $item)
+                @php
+                    $paidSoFar = bcadd(bcadd((string) $item->fees_paid, (string) $item->interest_paid, 2), (string) $item->principal_paid, 2);
+                @endphp
                 <tr>
                     <td class="px-4 py-3 font-medium">{{ $item->installment_number }}</td>
                     <td class="px-4 py-3">{{ $date($item->due_date) }}</td>
@@ -194,6 +194,7 @@
                     <td class="px-4 py-3 tabular-nums">{{ $money($item->interest_due) }}</td>
                     <td class="px-4 py-3 tabular-nums">{{ $money($item->fees_due) }}</td>
                     <td class="px-4 py-3 tabular-nums font-medium">{{ $money($item->total_installment_due) }}</td>
+                    <td class="px-4 py-3 tabular-nums">{{ $money($paidSoFar) }}</td>
                     <td class="px-4 py-3"><x-status-badge :status="$item->status" /></td>
                 </tr>
             @endforeach

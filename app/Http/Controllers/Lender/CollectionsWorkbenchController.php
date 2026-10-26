@@ -8,8 +8,10 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\CollectionsWorkbenchFilterRequest;
 use App\Models\CollectionCase;
 use App\Models\InDuplumTracking;
+use App\Models\Loan;
 use App\Models\RegulatoryCooldownLock;
 use App\Services\Servicing\FairCollectionsService;
+use App\Services\Servicing\OverdueDetectionService;
 use Carbon\CarbonImmutable;
 use Illuminate\Contracts\View\View;
 use Illuminate\Database\Eloquent\Builder;
@@ -18,10 +20,17 @@ final class CollectionsWorkbenchController extends Controller
 {
     private const CASE_LIMIT = 100;
 
-    public function index(CollectionsWorkbenchFilterRequest $request, FairCollectionsService $fair): View
-    {
+    public function index(
+        CollectionsWorkbenchFilterRequest $request,
+        FairCollectionsService $fair,
+        OverdueDetectionService $detector
+    ): View {
         $now = CarbonImmutable::now();
         $today = $now->toDateString();
+
+        // Today in Nairobi, expressed in the app's own timezone for the query.
+        $dayStart = $now->setTimezone('Africa/Nairobi')->startOfDay()->setTimezone((string) config('app.timezone'));
+        $dayEnd = $now->setTimezone('Africa/Nairobi')->endOfDay()->setTimezone((string) config('app.timezone'));
 
         // Same definition of "active" that FairCollectionsService uses.
         $activeLocks = fn (): Builder => RegulatoryCooldownLock::query()
@@ -34,10 +43,11 @@ final class CollectionsWorkbenchController extends Controller
             ->where('promised_date', '>=', $today);
 
         $stats = [
-            'cases'    => CollectionCase::query()->count(),
-            'cooldown' => CollectionCase::query()->whereIn('borrower_id', $activeLocks())->count(),
-            'ptp'      => CollectionCase::query()->whereHas('promisesToPay', $activePtp)->count(),
-            'frozen'   => InDuplumTracking::query()->where('is_frozen', true)->count(),
+            'cases'           => CollectionCase::query()->count(),
+            'cooldown'        => CollectionCase::query()->whereIn('borrower_id', $activeLocks())->count(),
+            'ptp'             => CollectionCase::query()->whereHas('promisesToPay', $activePtp)->count(),
+            'frozen'          => InDuplumTracking::query()->where('is_frozen', true)->count(),
+            'defaulted_today' => Loan::query()->whereBetween('defaulted_at', [$dayStart, $dayEnd])->count(),
         ];
 
         $filters = [
@@ -77,6 +87,18 @@ final class CollectionsWorkbenchController extends Controller
             ->limit(self::CASE_LIMIT)
             ->get();
 
+        // Same day count the overdue command uses, so screen and detection agree.
+        $overdue = [];
+        foreach ($cases as $case) {
+            $loan = $case->loan;
+            $days = $loan !== null ? $detector->daysPastDue($loan, $now) : 0;
+
+            $overdue[$case->id] = [
+                'days'  => $days,
+                'since' => ($loan !== null && $days > 0) ? $detector->overdueSince($loan, $now) : null,
+            ];
+        }
+
         $locks = RegulatoryCooldownLock::query()
             ->where('lock_type', 'COLLECTIONS_SMS')
             ->where('locked_until', '>', $now)
@@ -88,6 +110,7 @@ final class CollectionsWorkbenchController extends Controller
 
         return view('lender.collections.index', [
             'cases'         => $cases,
+            'overdue'       => $overdue,
             'locks'         => $locks,
             'stats'         => $stats,
             'filters'       => $filters,

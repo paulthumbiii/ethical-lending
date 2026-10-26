@@ -22,6 +22,7 @@ final class BorrowerController extends Controller
         'loans'        => 'Loans',
         'applications' => 'Applications',
         'statements'   => 'Statements',
+        'documents'    => 'Documents',
         'activity'     => 'Activity',
     ];
 
@@ -59,9 +60,9 @@ final class BorrowerController extends Controller
     {
         $tabs = self::TABS;
 
-        // Statement evidence is only for people who decide on it.
+        // Statement and ID evidence is only for people who decide on it.
         if (! $request->user()->can(StaffPermission::StatementsView->value)) {
-            unset($tabs['statements']);
+            unset($tabs['statements'], $tabs['documents']);
         }
 
         $tab = (string) $request->query('tab', 'overview');
@@ -71,7 +72,7 @@ final class BorrowerController extends Controller
 
         $borrower->load('financialProfile');
 
-        /** @var Collection<int, mixed> $rows */
+        /** @var Collection<int|string, mixed> $rows */
         $rows = match ($tab) {
             'loans' => $borrower->loans()->with('product')->latest('id')->get(),
             'applications' => LoanApplication::query()
@@ -83,6 +84,10 @@ final class BorrowerController extends Controller
                 ->where('borrower_id', $borrower->id)
                 ->latest('id')
                 ->get(),
+            'documents' => $borrower->kycDocuments()
+                ->with('verifier')
+                ->get()
+                ->keyBy('document_type'),
             'activity' => AuditTrail::query()
                 ->where(function ($w) use ($borrower): void {
                     $w->where(function ($own) use ($borrower): void {

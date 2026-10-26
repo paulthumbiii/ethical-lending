@@ -25,7 +25,7 @@
             </p>
         </x-card>
 
-        <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <div class="grid grid-cols-2 gap-4 lg:grid-cols-5">
             <div class="rounded-lg border border-line bg-white">
                 <x-stat label="Cases" :value="$stats['cases']" hint="All collection cases" />
             </div>
@@ -37,6 +37,9 @@
             </div>
             <div class="rounded-lg border border-line bg-white">
                 <x-stat label="Frozen at cap" :value="$stats['frozen']" hint="In-duplum, charges stopped" />
+            </div>
+            <div class="rounded-lg border border-line bg-white">
+                <x-stat label="Defaulted today" :value="$stats['defaulted_today']" hint="Reached 90 days past due" />
             </div>
         </div>
 
@@ -101,6 +104,7 @@
                                     $tracking = $loan?->inDuplumTracking;
                                     $lock = $locks[$case->borrower_id] ?? null;
                                     $ptp = $case->promisesToPay->first();
+                                    $od = $overdue[$case->id] ?? ['days' => 0, 'since' => null];
 
                                     $used = null;
                                     $cap = null;
@@ -126,7 +130,18 @@
                                         <p class="text-xs text-muted">{{ $pretty((string) $case->case_status) }}</p>
                                     </td>
                                     <td class="py-3 pr-4">{{ $loan?->borrower?->full_name ?? 'Unknown' }}</td>
-                                    <td class="py-3 pr-4">{{ $buckets[$case->dpd_bucket] ?? $case->dpd_bucket }}</td>
+                                    <td class="py-3 pr-4">
+                                        @if ($od['days'] > 0)
+                                            <p class="font-medium tabular-nums">{{ $od['days'] }} {{ $od['days'] === 1 ? 'day' : 'days' }}</p>
+                                            <p class="text-xs text-muted">{{ $buckets[$case->dpd_bucket] ?? $case->dpd_bucket }}</p>
+                                            @if ($od['since'])
+                                                <p class="text-xs tabular-nums text-muted">Overdue since {{ $od['since']->format('d M Y') }}</p>
+                                            @endif
+                                        @else
+                                            <p class="text-muted">Not overdue</p>
+                                            <p class="text-xs text-muted">{{ $buckets[$case->dpd_bucket] ?? $case->dpd_bucket }}</p>
+                                        @endif
+                                    </td>
                                     <td class="py-3 pr-4">
                                         @if ($lock)
                                             <x-badge tone="info">Quiet period</x-badge>

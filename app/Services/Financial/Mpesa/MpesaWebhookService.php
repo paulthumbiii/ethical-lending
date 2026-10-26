@@ -9,6 +9,7 @@ use App\Jobs\ProcessMpesaCallbackJob;
 use App\Models\Loan;
 use App\Models\MpesaC2bCallback;
 use App\Models\MpesaStkRequest;
+use App\Services\Customer\BorrowerNotificationService;
 use App\Services\Financial\GeneralLedgerService;
 use App\Services\Financial\PaymentWaterfallService;
 use Carbon\CarbonImmutable;
@@ -170,6 +171,8 @@ final class MpesaWebhookService
                 );
 
                 $callback->update(['is_reconciled' => true]);
+
+                $this->tellBorrower($loan, $amount);
             } elseif ($sourceType === 'STK') {
                 $stk = MpesaStkRequest::query()->where('id', $recordId)->lockForUpdate()->firstOrFail();
                 if ($stk->status !== 'successful' || $stk->loan_id === null) {
@@ -215,8 +218,25 @@ final class MpesaWebhookService
                     overpayment: $waterfall['overpayment_credit'],
                     reference: $reference
                 );
+
+                $this->tellBorrower($loan, $amount);
             }
         });
+    }
+
+    /** A short "we got your payment" alert. Display-only formatting; never affects the booking. */
+    private function tellBorrower(Loan $loan, string $amount): void
+    {
+        app(BorrowerNotificationService::class)->notify(
+            (int) $loan->borrower_id,
+            'repayment_received',
+            'Payment received',
+            sprintf(
+                'We received KES %s on loan %s. Thank you.',
+                number_format((float) $amount, 2),
+                $loan->loan_number
+            )
+        );
     }
 
     /**
