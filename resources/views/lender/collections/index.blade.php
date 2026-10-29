@@ -126,7 +126,7 @@
                                 @endphp
                                 <tr class="align-top">
                                     <td class="py-3 pr-4">
-                                        <p class="font-medium tabular-nums">{{ $loan?->loan_number ?? 'Unknown' }}</p>
+                                        <a href="{{ route('lender.collections.show', $case) }}" class="font-medium tabular-nums text-brand-700 underline">{{ $loan?->loan_number ?? 'Unknown' }}</a>
                                         <p class="text-xs text-muted">{{ $pretty((string) $case->case_status) }}</p>
                                     </td>
                                     <td class="py-3 pr-4">{{ $loan?->borrower?->full_name ?? 'Unknown' }}</td>

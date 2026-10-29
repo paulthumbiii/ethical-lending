@@ -1,38 +1,68 @@
-{{-- Phase 11.5 | resources/views/welcome.blade.php
-     Public landing page. Replaces Laravel's stock page, whose "Dashboard" link pointed to a route we don't have. --}}
+@php
+    $loginUrl = \Illuminate\Support\Facades\Route::has('login') ? route('login') : url('/login');
+    $registerUrl = \Illuminate\Support\Facades\Route::has('register') ? route('register') : url('/register');
+    $v = fn (string $f) => asset('welcome/' . $f) . '?v=' . time();
+@endphp
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Ethical Lending</title>
-    <style>
-        body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f7f7f2; color: #1c2b22; margin: 0; }
-        main { max-width: 32rem; margin: 0 auto; padding: 4rem 1.5rem; }
-        h1 { font-size: 1.75rem; margin: 0 0 .5rem; color: #14532d; }
-        p { line-height: 1.5; color: #4b5b52; }
-        .row { display: flex; gap: .75rem; margin-top: 1.5rem; flex-wrap: wrap; }
-        a.btn { padding: .65rem 1.1rem; border-radius: .4rem; border: 1px solid #166534; text-decoration: none; font-weight: 600; }
-        a.primary { background: #166534; color: #fff; }
-        a.ghost { color: #166534; background: #fff; }
-    </style>
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <title>Ethical Lending - Move forward. On your terms.</title>
+    <link rel="stylesheet" href="{{ $v('welcome.css') }}">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 </head>
 <body>
-<main>
-    <h1>Ethical Lending</h1>
-    <p>Lending that shows its working. Every charge is explained, and you can always see your protections.</p>
 
-    <div class="row">
-        @auth
-            @php
-                $home = auth()->user()->hasRole('borrower') ? route('borrower.dashboard') : route('lender.dashboard');
-            @endphp
-            <a class="btn primary" href="{{ $home }}">Go to my dashboard</a>
-        @else
-            <a class="btn primary" href="{{ route('login') }}">Log in</a>
-            <a class="btn ghost" href="{{ route('register') }}">Create an account</a>
-        @endauth
-    </div>
-</main>
+<div class="glow" id="glow"></div>
+
+<div class="page">
+    <header class="nav">
+        <a href="{{ url('/') }}" class="brand">Ethical <span>Lending</span></a>
+        <a href="{{ $loginUrl }}" class="nav-signin">Sign in</a>
+    </header>
+
+    <main class="hero">
+        <div class="hero-text">
+            <p class="eyebrow slide" style="--i:1">A more considered way to borrow</p>
+            <h1>
+                <span class="line slide" style="--i:2">Move forward.</span>
+                <span class="line accent slide" style="--i:3">On your terms.</span>
+            </h1>
+            <p class="lead slide" style="--i:4">Every charge explained. Before you say yes.</p>
+            <p class="copy slide" style="--i:5">
+                Borrow a small amount for 30 days and see the fee, the excise duty and the
+                interest laid out in plain figures before you accept. Money goes straight to
+                your M-Pesa, and you repay the same way, whenever it suits you.
+            </p>
+            <div class="actions slide" style="--i:6">
+                <a href="{{ $registerUrl }}" class="btn-gold">Get started</a>
+                <a href="{{ $loginUrl }}" class="link">Sign in &rarr;</a>
+            </div>
+            <div class="stats slide" style="--i:7">
+                <div><b>KES 1,000</b><span>Smallest loan</span></div>
+                <div><b>KES 20,000</b><span>Largest loan</span></div>
+                <div><b>30 days</b><span>To repay</span></div>
+            </div>
+            <div class="ticks slide" style="--i:8">
+                <span>Consent first</span>
+                <span>Fair collections</span>
+                <span>No hidden fees</span>
+            </div>
+        </div>
+
+        <div class="hero-stage" id="stageContainer" aria-hidden="true">
+            <div class="stage-backdrop-glow"></div>
+            <canvas id="webglCanvas"></canvas>
+        </div>
+    </main>
+
+    <footer class="foot">
+        <span>Demonstration project. Not a licensed lender.</span>
+        <span>Built in Kenya, for Kenya.</span>
+    </footer>
+</div>
+
+<script src="{{ $v('welcome.js') }}" defer></script>
 </body>
 </html>

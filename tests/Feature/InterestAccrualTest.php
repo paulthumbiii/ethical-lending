@@ -189,7 +189,10 @@ it('lets a full repayment clear the loan and mark the instalment paid', function
 });
 
 it('runs from the artisan command', function (): void {
-    $loan = accLoan('20000.00', LoanStatus::DISBURSED, CarbonImmutable::now('Africa/Nairobi')->subDays(10)->format('Y-m-d H:i:s'));
+    // Freeze the clock at midday so the result never depends on the hour the suite runs.
+    $this->travelTo(CarbonImmutable::parse('2026-10-29 12:00:00', 'Africa/Nairobi'));
+
+    $loan = accLoan('20000.00', LoanStatus::DISBURSED, '2026-10-19 10:00:00');
 
     $this->artisan('loans:accrue-interest')
         ->assertSuccessful()
