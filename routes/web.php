@@ -9,6 +9,7 @@ use App\Http\Controllers\Auth\RegisterController;
 use App\Http\Controllers\Borrower\ApplicationController;
 use App\Http\Controllers\Borrower\PaymentController;
 use App\Http\Controllers\Borrower\PortalController;
+use App\Http\Controllers\Borrower\PromiseController;
 use App\Http\Controllers\Borrower\RestructuringController;
 use App\Http\Controllers\Borrower\StatementController;
 use App\Http\Controllers\ContractVerificationController;
@@ -130,6 +131,7 @@ Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::Borrower->val
         Route::post('/apply/{loanApplication}/statement', [StatementController::class, 'store'])->middleware('throttle:5,1')->name('statement.store');
         Route::post('/loans/{loan}/restructuring', [RestructuringController::class, 'accept'])->name('restructuring.accept');
         Route::post('/loans/{loan}/pay', [PaymentController::class, 'store'])->middleware('throttle:6,1')->name('payment.store');
+        Route::post('/loans/{loan}/promise', [PromiseController::class, 'store'])->middleware('throttle:10,1')->name('promise.store');
     });
 
 Route::middleware([

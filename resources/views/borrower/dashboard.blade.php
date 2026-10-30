@@ -12,6 +12,10 @@
         <div class="mt-4 rounded-lg border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-800" role="alert">{{ $message }}</div>
     @enderror
 
+    @error('promise')
+        <div class="mt-4 rounded-lg border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-800" role="alert">{{ $message }}</div>
+    @enderror
+
     @if (! $borrower)
         <x-card class="mt-5">
             <p class="text-sm text-muted">Your borrower profile is not linked to this login yet. Contact support to finish setting it up.</p>
@@ -59,11 +63,29 @@
                 </div>
             </dl>
         </x-card>
-                @php
+        @php
             $ceiling = (int) bcadd($portal['owed'], '0.99', 0);
         @endphp
         @if (in_array($loan->status->value, ['disbursed', 'defaulted', 'restructured'], true) && $ceiling >= 1)
             <x-repayment-form :loan="$loan" :ceiling="$ceiling" :phone="(string) $borrower->phone_number" class="mt-5" />
+        @endif
+
+        @if ($promise)
+            <x-card title="Tell us when you will pay" class="mt-5">
+                @if ($promise['live'])
+                    <p class="text-sm">You promised {{ $money((string) $promise['live']->promised_amount) }} by {{ $promise['live']->promised_date->format('j M Y') }}. We will not send reminders until then.</p>
+                    <p class="mt-2 text-xs text-muted">If the payment has not arrived by that date, reminders start again. A promise does not change what you owe.</p>
+                @else
+                    <p class="text-sm text-muted">Your payment is late. Tell us how much you can pay and by when, and we will not send reminders until that date. Pick a date within the next {{ $promise['max_days'] }} days.</p>
+                    <form method="POST" action="{{ route('borrower.promise.store', $loan) }}" class="mt-4 space-y-4">
+                        @csrf
+                        <x-input label="Amount you can pay (KES)" name="amount" type="text" inputmode="decimal" :value="old('amount')" />
+                        <x-input label="Date you will pay" name="promised_date" type="date" :value="old('promised_date')" min="{{ $promise['min'] }}" max="{{ $promise['max'] }}" />
+                        <x-button type="submit" class="w-full">Save my promise</x-button>
+                        <p class="text-xs text-muted">A promise does not change what you owe. You can pay any time with M-Pesa above.</p>
+                    </form>
+                @endif
+            </x-card>
         @endif
 
         <x-in-duplum-meter :meter="$portal['meter']" class="mt-5" />
