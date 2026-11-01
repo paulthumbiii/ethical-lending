@@ -94,11 +94,12 @@
                 <p class="text-sm text-muted">No promises have been made on this case.</p>
             @else
                 <div class="overflow-x-auto">
-                    <table class="w-full min-w-[28rem] text-left text-sm">
+                    <table class="w-full min-w-[36rem] text-left text-sm">
                         <thead class="text-xs text-muted">
                             <tr>
                                 <th class="py-2 pr-4 font-medium">Promised by</th>
                                 <th class="py-2 pr-4 font-medium">Amount</th>
+                                <th class="py-2 pr-4 font-medium">Recorded by</th>
                                 <th class="py-2 pr-4 font-medium">Outcome</th>
                                 <th class="py-2 font-medium">Honored on (EAT)</th>
                             </tr>
@@ -108,6 +109,7 @@
                                 <tr>
                                     <td class="py-3 pr-4 tabular-nums">{{ $promise->promised_date->format('d M Y') }}</td>
                                     <td class="py-3 pr-4 tabular-nums">{{ $money((string) $promise->promised_amount) }}</td>
+                                    <td class="py-3 pr-4">{{ $recordedBy[$promise->id] ?? 'Not recorded' }}</td>
                                     <td class="py-3 pr-4"><x-badge tone="{{ $promiseTone((string) $promise->status) }}">{{ $pretty((string) $promise->status) }}</x-badge></td>
                                     <td class="py-3 tabular-nums">{{ $promise->honored_at?->timezone('Africa/Nairobi')->format('d M Y, H:i') ?? '-' }}</td>
                                 </tr>

@@ -50,7 +50,7 @@ final class BorrowerPortalService
             'due_date'   => $due?->format('j M Y'),
             'is_overdue' => $due !== null && $due->endOfDay()->isPast() && bccomp($owed, '0.00', 2) > 0,
             'meter'      => $this->inDuplumMeter($loan),
-            'relief'     => $this->canRequestRelief($loan) ? $this->reliefPreview($borrower, $balances) : null,
+            'relief'     => $this->canRequestRelief($loan) ? $this->reliefPreview($borrower, $balances, $loan) : null,
         ];
     }
 
@@ -156,18 +156,20 @@ final class BorrowerPortalService
 
     /**
      * A read-only preview that follows the same rules as RestructuringEngine
-     * (penalties forgiven, interest kept, balance split into two instalments).
-     * Nothing is saved here.
+     * (penalties forgiven, interest and the processing fee kept, balance split into two instalments).
+     * Pass the loan so the kept fee can be read from the ledger. Nothing is saved here.
      *
      * @param  array{principal: string, interest: string, fees: string}  $balances
      * @return array<string, mixed>
      */
-    public function reliefPreview(Borrower $borrower, array $balances): array
+    public function reliefPreview(Borrower $borrower, array $balances, ?Loan $loan = null): array
     {
         $ratio = $this->engine->calculateRepaymentRatio($borrower);
 
         $owedToday = $this->owed($balances);
-        $owedAfter = bcadd($balances['principal'], $balances['interest'], 2);
+        $kept = $loan !== null ? $this->keptFee($loan->id, $balances['fees']) : '0.00';
+        $waived = bcsub($balances['fees'], $kept, 2);
+        $owedAfter = bcadd(bcadd($balances['principal'], $balances['interest'], 2), $kept, 2);
 
         $first = bcdiv($owedAfter, '2.00', 2);
         $remainder = bcsub($owedAfter, bcmul($first, '2.00', 2), 2);
@@ -183,15 +185,16 @@ final class BorrowerPortalService
         }
 
         return [
-            'eligible'     => bccomp($ratio, self::MINIMUM_ELIGIBILITY_RATIO, 2) >= 0,
-            'owed_today'   => $owedToday,
-            'waived'       => $balances['fees'],
-            'owed_after'   => $owedAfter,
-            'first_amount' => $first,
+            'eligible'      => bccomp($ratio, self::MINIMUM_ELIGIBILITY_RATIO, 2) >= 0,
+            'owed_today'    => $owedToday,
+            'waived'        => $waived,
+            'kept_fee'      => $kept,
+            'owed_after'    => $owedAfter,
+            'first_amount'  => $first,
             'second_amount' => $second,
-            'options'      => self::EXTENSION_OPTIONS,
-            'default_days' => self::DEFAULT_EXTENSION_DAYS,
-            'schedule'     => $schedule,
+            'options'       => self::EXTENSION_OPTIONS,
+            'default_days'  => self::DEFAULT_EXTENSION_DAYS,
+            'schedule'      => $schedule,
         ];
     }
 
@@ -220,5 +223,25 @@ final class BorrowerPortalService
     private function owed(array $balances): string
     {
         return bcadd(bcadd($balances['principal'], $balances['interest'], 2), $balances['fees'], 2);
+    }
+
+    /**
+     * Same rule as RestructuringEngine::keptFee: the total ever charged as FEE_CHARGED,
+     * capped at what is still owed in fees. If you change one, change both.
+     */
+    private function keptFee(int $loanId, string $feesOwed): string
+    {
+        $charged = '0.00';
+
+        $rows = LoanLedgerEntry::query()
+            ->where('loan_id', $loanId)
+            ->where('entry_type', 'FEE_CHARGED')
+            ->get();
+
+        foreach ($rows as $row) {
+            $charged = bcadd($charged, (string) $row->debit, 2);
+        }
+
+        return bccomp($charged, $feesOwed, 2) < 0 ? $charged : $feesOwed;
     }
 }

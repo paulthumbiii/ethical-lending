@@ -161,12 +161,13 @@ final class OverdueDetectionService
 
     /**
      * Due day (Y-m-d) of the oldest unpaid instalment, or the loan's due date when there is no schedule.
+     * Instalments replaced by a relief plan (superseded) are ignored.
      */
     private function dueDay(Loan $loan): ?string
     {
         $unpaid = AmortizationSchedule::query()
             ->where('loan_id', $loan->id)
-            ->where('status', '!=', 'paid')
+            ->whereNotIn('status', ['paid', AmortizationScheduleService::SUPERSEDED])
             ->orderBy('installment_number')
             ->first();
 

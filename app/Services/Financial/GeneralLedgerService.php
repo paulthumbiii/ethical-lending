@@ -33,10 +33,10 @@ final class GeneralLedgerService
         return DB::transaction(function () use ($description, $items, $referenceType, $referenceId): JournalEntry {
             $now = CarbonImmutable::now();
 
-            // 1. Determine and validate active accounting period
+            // 1. Determine and validate active accounting period (compare dates only)
             $period = AccountingPeriod::query()
-                ->where('start_date', '<=', $now->toDateString())
-                ->where('end_date', '>=', $now->toDateString())
+                ->whereDate('start_date', '<=', $now->toDateString())
+                ->whereDate('end_date', '>=', $now->toDateString())
                 ->first();
 
             if ($period === null) {

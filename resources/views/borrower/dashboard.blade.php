@@ -101,11 +101,14 @@
                             idx: {{ (int) array_search($relief['default_days'], $relief['options'], true) }},
                             get days() { return this.options[this.idx]; }
                         }">
-                        <p class="text-sm text-muted">If you cannot pay in full, you can ask for more time. Penalties and fees are removed and you pay what is left in two parts.</p>
+                        <p class="text-sm text-muted">If you cannot pay in full, you can ask for more time. Penalties are removed. The processing fee you agreed to when you borrowed stays, and you pay what is left in two parts.</p>
 
                         <dl class="mt-4 divide-y divide-line text-sm">
                             <div class="flex justify-between py-2"><dt class="text-muted">You owe today</dt><dd class="tabular-nums">{{ $money($relief['owed_today']) }}</dd></div>
-                            <div class="flex justify-between py-2"><dt class="text-muted">Penalties and fees removed</dt><dd class="tabular-nums text-emerald-700">- {{ $money($relief['waived']) }}</dd></div>
+                            <div class="flex justify-between py-2"><dt class="text-muted">Penalties removed</dt><dd class="tabular-nums text-emerald-700">- {{ $money($relief['waived']) }}</dd></div>
+                            @if (bccomp($relief['kept_fee'], '0.00', 2) > 0)
+                                <div class="flex justify-between py-2"><dt class="text-muted">Processing fee kept</dt><dd class="tabular-nums">{{ $money($relief['kept_fee']) }}</dd></div>
+                            @endif
                             <div class="flex justify-between py-2 font-semibold"><dt>You would owe after relief</dt><dd class="tabular-nums">{{ $money($relief['owed_after']) }}</dd></div>
                         </dl>
 

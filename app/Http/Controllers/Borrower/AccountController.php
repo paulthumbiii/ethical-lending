@@ -36,7 +36,13 @@ final class AccountController extends Controller
                 }
 
                 $schedule = [];
-                foreach ($loan->amortizationSchedules()->orderBy('installment_number')->get() as $item) {
+                // Instalments replaced by a relief plan are history, not something the borrower should pay.
+                $items = $loan->amortizationSchedules()
+                    ->where('status', '!=', 'superseded')
+                    ->orderBy('installment_number')
+                    ->get();
+
+                foreach ($items as $item) {
                     $paid = bcadd(
                         bcadd((string) $item->fees_paid, (string) $item->interest_paid, 2),
                         (string) $item->principal_paid,

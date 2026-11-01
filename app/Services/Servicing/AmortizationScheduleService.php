@@ -17,10 +17,13 @@ use Throwable;
 /**
  * 14.1. Repayment schedule: one instalment per 30 days of tenure (rounded up).
  * Interest uses the same simple formula as the contract. Fees are what the ledger really charged.
+ * 14.5a. When relief is accepted the unpaid instalments are superseded by the relief plan.
  */
 final class AmortizationScheduleService
 {
     public const DAYS_PER_INSTALMENT = 30;
+
+    public const SUPERSEDED = 'superseded';
 
     public function __construct(private readonly LoanFeeService $fees)
     {
@@ -88,7 +91,76 @@ final class AmortizationScheduleService
     }
 
     /**
+     * 14.5a. Relief accepted: unpaid instalments are marked superseded (kept for history) and new
+     * instalments are written for the relief plan from the balances left after the waiver.
+     * Paid instalments are untouched. Returns the last new due date (Y-m-d), or null when nothing was written.
+     *
+     * @param list<string> $dueDates
+     */
+    public function supersedeForRelief(Loan $loan, array $dueDates, string $fees, string $interest, string $principal): ?string
+    {
+        $dueDates = array_values($dueDates);
+        $count = count($dueDates);
+        $total = bcadd(bcadd($fees, $interest, 2), $principal, 2);
+
+        if ($count === 0 || bccomp($total, '0.00', 2) <= 0) {
+            return null;
+        }
+
+        return DB::transaction(function () use ($loan, $dueDates, $count, $total, $fees, $interest, $principal): string {
+            AmortizationSchedule::query()
+                ->where('loan_id', $loan->id)
+                ->whereIn('status', ['pending', 'partial'])
+                ->update(['status' => self::SUPERSEDED]);
+
+            $number = (int) AmortizationSchedule::query()->where('loan_id', $loan->id)->max('installment_number');
+
+            $each = bcdiv($total, (string) $count, 2);
+            $remainingTotal = $total;
+            $remFees = $fees;
+            $remInterest = $interest;
+            $remPrincipal = $principal;
+            $lastDate = $dueDates[$count - 1];
+
+            foreach ($dueDates as $index => $date) {
+                $amount = $index === $count - 1 ? $remainingTotal : $each;
+                $room = $amount;
+
+                $f = bccomp($remFees, $room, 2) < 0 ? $remFees : $room;
+                $room = bcsub($room, $f, 2);
+                $n = bccomp($remInterest, $room, 2) < 0 ? $remInterest : $room;
+                $room = bcsub($room, $n, 2);
+                $p = $room;
+
+                $remFees = bcsub($remFees, $f, 2);
+                $remInterest = bcsub($remInterest, $n, 2);
+                $remPrincipal = bcsub($remPrincipal, $p, 2);
+                $remainingTotal = bcsub($remainingTotal, $amount, 2);
+
+                $number++;
+
+                AmortizationSchedule::create([
+                    'loan_id'               => $loan->id,
+                    'installment_number'    => $number,
+                    'due_date'              => $date,
+                    'principal_due'         => $p,
+                    'interest_due'          => $n,
+                    'fees_due'              => $f,
+                    'total_installment_due' => $amount,
+                    'principal_paid'        => '0.00',
+                    'interest_paid'         => '0.00',
+                    'fees_paid'             => '0.00',
+                    'status'                => 'pending',
+                ]);
+            }
+
+            return $lastDate;
+        });
+    }
+
+    /**
      * Marks a repayment against the oldest unpaid instalments (fees, interest, principal).
+     * Superseded instalments are skipped.
      * Bookkeeping only: it never throws, so it can never undo a repayment.
      */
     public function applyPayment(int $loanId, string $fees, string $interest, string $principal): void
@@ -97,6 +169,7 @@ final class AmortizationScheduleService
             DB::transaction(function () use ($loanId, $fees, $interest, $principal): void {
                 $rows = AmortizationSchedule::query()
                     ->where('loan_id', $loanId)
+                    ->where('status', '!=', self::SUPERSEDED)
                     ->orderBy('installment_number')
                     ->lockForUpdate()
                     ->get();

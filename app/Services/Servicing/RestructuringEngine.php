@@ -15,12 +15,15 @@ use App\Models\RestructuringProposal;
 use App\Models\RestructuringSchedule;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Throwable;
 
 /**
  * Phase 6 / 11.5b. Restructuring relief.
  * 11.5b: only penalties are forgiven. The agreed processing fee (FEE_CHARGED rows) stays on the
  * balance, because it was disclosed at disbursement and its GL and excise postings still stand.
+ * 14.5a: accepting relief also replaces the unpaid repayment-schedule instalments with the relief plan.
  */
 final class RestructuringEngine
 {
@@ -213,6 +216,32 @@ final class RestructuringEngine
                 'status'   => LoanStatus::RESTRUCTURED,
                 'due_date' => CarbonImmutable::parse($loan->due_date ?? $now)->addDays($lockedProposal->tenure_extension_days),
             ]);
+
+            // 3b. 14.5a: the repayment schedule follows the relief plan.
+            // A problem here is logged and never blocks the restructure.
+            try {
+                $after = LoanLedgerEntry::where('loan_id', $loan->id)->latest('id')->first();
+
+                $dates = $lockedProposal->schedules()
+                    ->orderBy('installment_number')
+                    ->pluck('due_date')
+                    ->map(fn ($d): string => CarbonImmutable::parse($d)->toDateString())
+                    ->all();
+
+                $lastDue = app(AmortizationScheduleService::class)->supersedeForRelief(
+                    $loan,
+                    $dates,
+                    $after ? (string) $after->running_fees_balance : '0.00',
+                    $after ? (string) $after->running_interest_balance : '0.00',
+                    $after ? (string) $after->running_principal_balance : (string) $loan->principal_disbursed
+                );
+
+                if ($lastDue !== null) {
+                    $loan->update(['due_date' => $lastDue]);
+                }
+            } catch (Throwable $e) {
+                Log::channel('fintech')->warning('Relief schedule failed for loan ' . $loan->id . ': ' . $e->getMessage());
+            }
 
             // 4. Dispatch cryptographically chained Outbox Event
             $prevEvent = OutboxEvent::query()->latest('id')->first();
