@@ -1,6 +1,5 @@
-<div>
-    <!-- The biggest battle is the war against ignorance. - Mustafa Kemal Atatürk -->
-</div>@props(['meter'])
+{{-- resources/views/components/in-duplum-meter.blade.php --}}
+@props(['meter'])
 @php
     $state = $meter['state'];
     $money = fn (string $v): string => 'KES ' . number_format((float) $v, 2);
@@ -20,7 +19,7 @@
             <div class="mt-3 h-3 overflow-hidden rounded-full bg-line"
                  role="progressbar" aria-label="Share of the legal limit used"
                  aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ (int) $meter['percent'] }}">
-                <div class="h-full rounded-full {{ $state === 'frozen' ? 'bg-brand-600' : 'bg-amber-500' }}"
+                <div class="h-full rounded-full {{ $state === 'frozen' ? 'bg-emerald-600' : 'bg-amber-500' }}"
                      style="width: {{ $meter['percent'] }}%"></div>
             </div>
             <div class="mt-2 flex justify-between text-xs tabular-nums text-muted">

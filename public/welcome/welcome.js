@@ -569,7 +569,7 @@
 
         // 1. Stately Intro Rise (Smooth cubic ease-out)
         if (introProgress < 1.0) {
-            introProgress += delta * 0.28;
+            introProgress += delta * 0.45;
             cardMeshes.forEach(function (m) {
                 var p = Math.max(0, Math.min(1, (introProgress - m.userData.delay) / 0.65));
                 var ease = 1 - Math.pow(1 - p, 3);

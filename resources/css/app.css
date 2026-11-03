@@ -1,23 +1,31 @@
+/* resources/css/app.css */
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap");
 @import "tailwindcss";
 
 @theme {
-    /* System fonts: no downloads, fast on mobile data. */
-    --font-sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    /* Fonts: Google Fonts first, system fonts as a fallback while loading. */
+    --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
 
-    /* Brand: deep forest green. Change these to re-theme everything. */
-    --color-brand-50: #eef6f1;
-    --color-brand-100: #d7eadf;
-    --color-brand-500: #2e8b62;
-    --color-brand-600: #1f7a52;
-    --color-brand-700: #0f5132;
-    --color-brand-900: #0b2a1f;
+    /* Brand: midnight and emerald (palette E). Change these to re-theme everything. */
+    --color-brand-50: #ecfdf5;
+    --color-brand-100: #d1fae5;
+    --color-brand-500: #10b981;
+    --color-brand-600: #059669;
+    --color-brand-700: #047857;
+    --color-brand-800: #0f1b33;
+    --color-brand-900: #0b1220;
+
+    /* Mint accent: for highlights on dark surfaces only, never as text on white. */
+    --color-accent-400: #34d399;
 
     /* Surfaces and text */
-    --color-paper: #f6f7f4;
-    --color-ink: #16241e;
-    --color-line: #dde3dd;
-    --color-muted: #5b6b63;
-        --text-2xs: 0.6875rem;
+    --color-paper: #f3f7f6;
+    --color-ink: #0b1220;
+    --color-line: #dce6e3;
+    --color-muted: #5a6b68;
+
+    --text-2xs: 0.6875rem;
     --text-3xs: 0.625rem;
 }
 
