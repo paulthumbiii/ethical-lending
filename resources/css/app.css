@@ -7,23 +7,23 @@
     --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
 
-    /* Brand: midnight and emerald (palette E). Change these to re-theme everything. */
-    --color-brand-50: #ecfdf5;
-    --color-brand-100: #d1fae5;
-    --color-brand-500: #10b981;
-    --color-brand-600: #059669;
-    --color-brand-700: #047857;
-    --color-brand-800: #0f1b33;
+    /* Brand: navy, matching the landing page. Change these to re-theme everything. */
+    --color-brand-50: #eef3fb;
+    --color-brand-100: #dbe6f5;
+    --color-brand-500: #3b6aa8;
+    --color-brand-600: #2a4f82;
+    --color-brand-700: #1e3a5f;
+    --color-brand-800: #12233d;
     --color-brand-900: #0b1220;
 
-    /* Mint accent: for highlights on dark surfaces only, never as text on white. */
-    --color-accent-400: #34d399;
+    /* Soft blue accent: highlights on dark surfaces only, never as text on white. */
+    --color-accent-400: #93c5fd;
 
     /* Surfaces and text */
-    --color-paper: #f3f7f6;
+    --color-paper: #f4f6fa;
     --color-ink: #0b1220;
-    --color-line: #dce6e3;
-    --color-muted: #5a6b68;
+    --color-line: #dde3ee;
+    --color-muted: #5a6678;
 
     --text-2xs: 0.6875rem;
     --text-3xs: 0.625rem;

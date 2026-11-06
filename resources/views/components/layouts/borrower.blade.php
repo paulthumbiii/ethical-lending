@@ -1,5 +1,5 @@
 {{-- resources/views/components/layouts/borrower.blade.php --}}
-@props(['title' => 'Home'])
+@props(['title' => 'Home', 'wide' => false])
 @php
     $unreadAlerts = \App\Models\BorrowerNotification::unreadCountFor(auth()->user()?->borrower?->id);
     $links = [
@@ -50,7 +50,7 @@
         </div>
     </header>
 
-    <main class="mx-auto max-w-3xl px-4 pb-28 pt-6 md:pb-12">
+    <main @class(['mx-auto px-4 pb-28 pt-6 md:pb-12', 'max-w-3xl' => ! $wide, 'max-w-5xl' => $wide])>
         {{ $slot }}
     </main>
 </body>

@@ -8,6 +8,7 @@ use App\Enums\LoanStatus;
 use App\Http\Controllers\Controller;
 use App\Models\BorrowerKycDocument;
 use App\Services\Customer\BorrowerPortalService;
+use Carbon\CarbonImmutable;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\View\View;
@@ -29,8 +30,9 @@ final class AccountController extends Controller
         if ($borrower !== null) {
             foreach ($borrower->loans()->latest('id')->get() as $loan) {
                 $owed = '0.00';
+                $open = $loan->status !== LoanStatus::SETTLED && $loan->status !== LoanStatus::WRITTEN_OFF;
 
-                if ($loan->status !== LoanStatus::SETTLED && $loan->status !== LoanStatus::WRITTEN_OFF) {
+                if ($open) {
                     $b = $this->portal->balances($loan);
                     $owed = bcadd(bcadd($b['principal'], $b['interest'], 2), $b['fees'], 2);
                 }
@@ -49,12 +51,22 @@ final class AccountController extends Controller
                         2
                     );
                     $left = bcsub((string) $item->total_installment_due, $paid, 2);
+                    $left = bccomp($left, '0.00', 2) < 0 ? '0.00' : $left;
+                    $status = (string) $item->status;
+
+                    // "Overdue" is derived: there is no overdue status on an instalment.
+                    $dueDay = CarbonImmutable::parse($item->due_date->toDateString(), 'Africa/Nairobi')->endOfDay();
+                    $overdue = $open
+                        && $status !== 'paid'
+                        && bccomp($left, '0.00', 2) > 0
+                        && $dueDay->isPast();
 
                     $schedule[] = [
-                        'number' => (int) $item->installment_number,
-                        'due'    => $item->due_date,
-                        'left'   => bccomp($left, '0.00', 2) < 0 ? '0.00' : $left,
-                        'status' => (string) $item->status,
+                        'number'  => (int) $item->installment_number,
+                        'due'     => $item->due_date,
+                        'left'    => $left,
+                        'status'  => $status,
+                        'overdue' => $overdue,
                     ];
                 }
 

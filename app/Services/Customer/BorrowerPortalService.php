@@ -50,6 +50,7 @@ final class BorrowerPortalService
             'due_date'   => $due?->format('j M Y'),
             'is_overdue' => $due !== null && $due->endOfDay()->isPast() && bccomp($owed, '0.00', 2) > 0,
             'meter'      => $this->inDuplumMeter($loan),
+            'progress'   => $this->progress($loan, $owed),
             'relief'     => $this->canRequestRelief($loan) ? $this->reliefPreview($borrower, $balances, $loan) : null,
         ];
     }
@@ -223,6 +224,40 @@ final class BorrowerPortalService
     private function owed(array $balances): string
     {
         return bcadd(bcadd($balances['principal'], $balances['interest'], 2), $balances['fees'], 2);
+    }
+
+    /**
+     * Repayment progress for the loan card. Repaid is what the payment waterfall allocated to
+     * fees, interest and principal (overpayment credit is not counted). The total is repaid plus
+     * what is still owed. Display only; BCMath on strings, no floats. Percent is a whole number 0 to 100.
+     *
+     * @return array{repaid: string, total: string, percent: string}
+     */
+    private function progress(Loan $loan, string $owed): array
+    {
+        $repaid = '0.00';
+
+        foreach ($loan->waterfallLogs()->get() as $log) {
+            $part = bcadd(
+                bcadd((string) ($log->allocated_to_fees ?? '0.00'), (string) ($log->allocated_to_interest ?? '0.00'), 2),
+                (string) ($log->allocated_to_principal ?? '0.00'),
+                2
+            );
+            $repaid = bcadd($repaid, $part, 2);
+        }
+
+        $total = bcadd($repaid, $owed, 2);
+        $percent = '0';
+
+        if (bccomp($total, '0.00', 2) > 0) {
+            $percent = bcdiv(bcmul($repaid, '100', 2), $total, 0);
+
+            if (bccomp($percent, '100', 0) > 0) {
+                $percent = '100';
+            }
+        }
+
+        return ['repaid' => $repaid, 'total' => $total, 'percent' => $percent];
     }
 
     /**

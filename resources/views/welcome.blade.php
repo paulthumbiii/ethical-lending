@@ -3,6 +3,11 @@
     $loginUrl = \Illuminate\Support\Facades\Route::has('login') ? route('login') : url('/login');
     $registerUrl = \Illuminate\Support\Facades\Route::has('register') ? route('register') : url('/register');
     $v = fn (string $f) => asset('welcome/' . $f) . '?v=' . time();
+
+    $signedIn = auth()->user();
+    $homeUrl = $signedIn === null
+        ? null
+        : ($signedIn->hasRole(\App\Enums\UserRole::Borrower->value) ? route('borrower.dashboard') : route('lender.dashboard'));
 @endphp
 <!DOCTYPE html>
 <html lang="en">
@@ -31,8 +36,16 @@
             <a href="#calculator">Calculator</a>
             <a href="#fair">Fair collections</a>
             <a href="#faq">FAQ</a>
-            <a href="{{ $loginUrl }}" class="nav-signin">Sign in</a>
-            <a href="{{ $registerUrl }}" class="btn btn-primary btn-pill">Get started</a>
+            @if ($signedIn)
+                <form method="POST" action="{{ route('logout') }}">
+                    @csrf
+                    <button type="submit" class="nav-signin linkbtn">Sign out</button>
+                </form>
+                <a href="{{ $homeUrl }}" class="btn btn-primary btn-pill">Open dashboard</a>
+            @else
+                <a href="{{ $loginUrl }}" class="nav-signin">Sign in</a>
+                <a href="{{ $registerUrl }}" class="btn btn-primary btn-pill">Get started</a>
+            @endif
         </nav>
     </div>
 </header>
@@ -49,7 +62,11 @@
                     Money goes straight to your M-Pesa, and you repay the same way.
                 </p>
                 <div class="actions rise" style="--i:5">
-                    <a href="{{ $registerUrl }}" class="btn btn-primary">Get started</a>
+                    @if ($signedIn)
+                        <a href="{{ $homeUrl }}" class="btn btn-primary">Open your dashboard</a>
+                    @else
+                        <a href="{{ $registerUrl }}" class="btn btn-primary">Get started</a>
+                    @endif
                     <a href="#calculator" class="btn btn-ghost">See what a loan costs</a>
                 </div>
                 <div class="stats rise" style="--i:6">

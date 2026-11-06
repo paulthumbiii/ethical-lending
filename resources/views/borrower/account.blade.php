@@ -93,26 +93,37 @@
                 </dl>
 
                 @if (count($row['schedule']) > 0)
-                    <h3 class="mt-4 text-sm font-semibold">Your repayment schedule</h3>
-                    <ul class="mt-2 divide-y divide-line text-sm">
+                    <h3 class="mt-5 text-sm font-semibold">Your repayment schedule</h3>
+                    <ol class="ml-1.5 mt-3 border-l border-line">
                         @foreach ($row['schedule'] as $item)
-                            <li class="flex items-center justify-between gap-3 py-2">
-                                <div>
-                                    <p class="font-medium">Payment {{ $item['number'] }}</p>
-                                    <p class="text-xs text-muted">Due {{ $item['due']->format('j M Y') }}</p>
-                                </div>
-                                <div class="flex items-center gap-2">
-                                    <span class="tabular-nums">{{ $money($item['left']) }}</span>
-                                    <x-status-badge :status="$item['status']" />
+                            @php
+                                $dot = $item['status'] === 'paid'
+                                    ? 'bg-emerald-600'
+                                    : ($item['overdue'] ? 'bg-rose-500' : 'bg-brand-500');
+                            @endphp
+                            <li class="relative pb-5 pl-6 text-sm last:pb-0">
+                                <span class="absolute -left-[5px] top-1.5 h-2.5 w-2.5 rounded-full {{ $dot }}" aria-hidden="true"></span>
+                                <div class="flex items-start justify-between gap-3">
+                                    <div>
+                                        <p class="font-medium">Payment {{ $item['number'] }}</p>
+                                        <p class="text-xs text-muted">Due {{ $item['due']->format('j M Y') }}</p>
+                                    </div>
+                                    <div class="flex flex-wrap items-center justify-end gap-2">
+                                        <span class="tabular-nums">{{ $money($item['left']) }}</span>
+                                        @if ($item['overdue'])
+                                            <x-badge tone="danger">Overdue</x-badge>
+                                        @endif
+                                        <x-status-badge :status="$item['status']" />
+                                    </div>
                                 </div>
                             </li>
                         @endforeach
-                    </ul>
-                    <p class="mt-2 text-xs text-muted">Each amount is what is still to pay on that instalment.</p>
+                    </ol>
+                    <p class="mt-3 text-xs text-muted">Each amount is what is still to pay on that instalment.</p>
                 @endif
 
                 @if ($hasContract)
-                    <p class="mt-3 text-sm">
+                    <p class="mt-4 text-sm">
                         <a href="{{ route('borrower.contract', ['loan' => $loan->id]) }}" target="_blank" rel="noopener" class="font-medium text-brand-700 underline-offset-4 hover:underline">Download contract</a>
                         <span class="text-xs text-muted">(use Print, then Save as PDF)</span>
                     </p>
@@ -120,7 +131,9 @@
             </x-card>
         @empty
             <x-card class="mt-3">
-                <p class="text-sm text-muted">You have no loans yet.</p>
+                <x-empty-state class="!px-0 !py-4" title="You have no loans yet." text="When you borrow, each loan and its repayment schedule will show here.">
+                    <a href="{{ route('borrower.apply.create') }}" class="inline-flex items-center rounded-md bg-brand-900 px-4 py-2 text-sm font-medium text-white hover:bg-brand-800">Apply for a loan</a>
+                </x-empty-state>
             </x-card>
         @endforelse
     @endif
