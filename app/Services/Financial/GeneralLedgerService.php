@@ -137,12 +137,10 @@ final class GeneralLedgerService
      */
     public function recordFeeWithExcisePosting(Loan $loan, string $feeName, string $feeAmount): JournalEntry
     {
-        // 20% statutory rate: Excise = Fee * 0.20
         $exciseRate = '20.00';
         $exciseAmount = bcmul($feeAmount, '0.20', 2);
         $netFeeIncome = bcsub($feeAmount, $exciseAmount, 2);
 
-        // Record tax entry for KRA reporting
         TaxWithholdingLedger::create([
             'loan_id'            => $loan->id,
             'fee_name'           => $feeName,
@@ -206,6 +204,24 @@ final class GeneralLedgerService
         return $this->postBalancedEntry(
             description: sprintf('Repayment received via M-Pesa [Ref: %s] for Loan #%s', $reference, $loan->loan_number),
             items: $items,
+            referenceType: Loan::class,
+            referenceId: $loan->id
+        );
+    }
+
+    /**
+     * Records Loan Write-Off (Bad Debt Expense):
+     * DEBIT:  5010 - Bad Debt Expense (Expense increases)
+     * CREDIT: 1200 - Loans Receivable (Asset decreases)
+     */
+    public function recordLoanWriteOffPosting(Loan $loan, string $amount): JournalEntry
+    {
+        return $this->postBalancedEntry(
+            description: sprintf('Bad debt write-off for Loan #%s', $loan->loan_number),
+            items: [
+                ['account_code' => '5010', 'debit' => $amount, 'credit' => '0.00'],
+                ['account_code' => '1200', 'debit' => '0.00', 'credit' => $amount],
+            ],
             referenceType: Loan::class,
             referenceId: $loan->id
         );

@@ -78,6 +78,21 @@
 
             <div class="hero-stage" id="stageContainer" aria-hidden="true">
                 <div class="stage-backdrop-glow"></div>
+
+                {{-- CSS Card Fallback: visible before Three.js loads or if CDN is blocked --}}
+                <div class="stage-fallback-wrap" id="stageFallback">
+                    <div class="stage-fallback-card stage-fallback-card-gold">
+                        <div class="card-chip"></div>
+                        <div class="text-xs font-semibold tracking-wider text-accent-400">ETHICAL LENDING</div>
+                        <div class="font-mono text-xs tabular-nums text-white/70">&bull;&bull;&bull;&bull; 4417</div>
+                    </div>
+                    <div class="stage-fallback-card stage-fallback-card-navy">
+                        <div class="card-chip"></div>
+                        <div class="text-xs font-semibold tracking-wider text-white">ETHICAL LENDING</div>
+                        <div class="font-mono text-xs tabular-nums text-white/80">&bull;&bull;&bull;&bull; 9201</div>
+                    </div>
+                </div>
+
                 <canvas id="webglCanvas"></canvas>
             </div>
         </div>
@@ -169,5 +184,22 @@
 
 <script src="{{ $v('welcome.js') }}" defer></script>
 <script src="{{ $v('landing.js') }}" defer></script>
+<script>
+    // Hide fallback smoothly when Three.js canvas initializes
+    document.addEventListener('DOMContentLoaded', () => {
+        const canvas = document.getElementById('webglCanvas');
+        const fallback = document.getElementById('stageFallback');
+        if (canvas && fallback) {
+            const checkReady = setInterval(() => {
+                if (window.THREE && canvas.width > 0 && canvas.style.display !== 'none') {
+                    fallback.style.opacity = '0';
+                    setTimeout(() => fallback.style.display = 'none', 400);
+                    clearInterval(checkReady);
+                }
+            }, 300);
+            setTimeout(() => clearInterval(checkReady), 8000);
+        }
+    });
+</script>
 </body>
 </html>

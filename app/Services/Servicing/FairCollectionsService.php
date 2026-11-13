@@ -37,23 +37,23 @@ final class FairCollectionsService
         return $hour >= self::LEGAL_HOUR_START && $hour < self::LEGAL_HOUR_END;
     }
     
-/**
- * Asserts legal hours, throwing an explicit regulatory exception if outside 08:00–18:00 EAT.
- *
- * @throws OutsideLegalOutreachHoursException
- */
-public function assertWithinLegalContactHours(?CarbonImmutable $time = null): bool
-{
-    $eatTime = ($time ?? CarbonImmutable::now())->setTimezone('Africa/Nairobi');
+    /**
+     * Asserts legal hours, throwing an explicit regulatory exception if outside 08:00–18:00 EAT.
+     *
+     * @throws OutsideLegalOutreachHoursException
+     */
+    public function assertWithinLegalContactHours(?CarbonImmutable $time = null): bool
+    {
+        $eatTime = ($time ?? CarbonImmutable::now())->setTimezone('Africa/Nairobi');
 
-    if (!$this->isWithinLegalContactHours($eatTime)) {
-        throw new OutsideLegalOutreachHoursException(
-            currentTimeEAT: $eatTime->format('H:i')
-        );
+        if (!$this->isWithinLegalContactHours($eatTime)) {
+            throw new OutsideLegalOutreachHoursException(
+                currentTimeEAT: $eatTime->format('H:i')
+            );
+        }
+
+        return true;
     }
-
-    return true;
-}
 
     /**
      * Checks if a borrower is currently locked under the 48-hour quiet period.
@@ -114,10 +114,16 @@ public function assertWithinLegalContactHours(?CarbonImmutable $time = null): bo
                 return null;
             }
 
-            // 3. Resolve or create Collection Case
+            // 3. Resolve Collection Case
             $case = CollectionCase::query()
                 ->where('loan_id', $lockedLoan->id)
                 ->first();
+
+            // Guard: Closed collection cases must never receive automated reminders
+            if ($case !== null && $case->case_status === 'closed') {
+                Log::channel('daily')->info(sprintf('Fair Collections: Loan #%d skipped because collection case is closed.', $loan->id));
+                return null;
+            }
 
             if ($case === null) {
                 $daysOverdue = max(1, (int) CarbonImmutable::parse($lockedLoan->due_date)->diffInDays($now));

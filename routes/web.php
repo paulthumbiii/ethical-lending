@@ -20,6 +20,7 @@ use App\Http\Controllers\Lender\CollectionCaseController;
 use App\Http\Controllers\Lender\CollectionsWorkbenchController;
 use App\Http\Controllers\Lender\LoanController;
 use App\Http\Controllers\Lender\LoanDisbursementController;
+use App\Http\Controllers\Lender\LoanWriteOffController;
 use App\Http\Controllers\Lender\MakerCheckerController;
 use App\Http\Controllers\Lender\StatementReviewController;
 use Illuminate\Support\Facades\Route;
@@ -64,6 +65,7 @@ Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::staffPipe()])
             ->group(function () {
                 Route::get('/', [LoanController::class, 'index'])->name('index');
                 Route::get('/{loan}', [LoanController::class, 'show'])->name('show');
+                Route::post('/{loan}/write-off', [LoanWriteOffController::class, 'store'])->name('write-off');
             });
 
         // Applications queue: credit officers and admins act, finance officers view only.
@@ -78,7 +80,6 @@ Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::staffPipe()])
                     ->group(function () {
                         Route::post('/{loanApplication}/check', [ApplicationQueueController::class, 'runCheck'])->name('check');
                         Route::post('/{loanApplication}/final-approval', [ApplicationQueueController::class, 'requestApproval'])->name('final-approval');
-                        // Statement evidence: documents are only for people who decide on them.
                         Route::get('/statements/{mpesaStatementUpload}/file', [StatementReviewController::class, 'file'])->name('statements.file');
                         Route::post('/statements/{mpesaStatementUpload}/password', [StatementReviewController::class, 'password'])->name('statements.password');
                         Route::post('/statements/{mpesaStatementUpload}/accept', [StatementReviewController::class, 'accept'])->name('statements.accept');
@@ -103,8 +104,7 @@ Route::middleware(['auth', RoleMiddleware::class . ':' . UserRole::staffPipe()])
                 Route::post('/{makerCheckerRequest}/reject', [MakerCheckerController::class, 'reject'])->name('reject');
             });
 
-        // Collections workbench list is read-only (GET only). The case page is read-only for
-        // viewers; only promise recorders can post a promise to pay (Phase 14.4b).
+        // Collections workbench list is read-only (GET only). The case page is read-only for viewers.
         Route::middleware(RoleMiddleware::class . ':' . UserRole::collectionsViewersPipe())
             ->prefix('collections')
             ->name('collections.')

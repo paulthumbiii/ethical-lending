@@ -156,6 +156,23 @@ it('skips borrowers with opt-out on file under Data Protection Act', function ()
     expect($action)->toBeNull();
 });
 
+it('does not send outreach if the collection case is closed', function (): void {
+    $legalTime = CarbonImmutable::parse('2026-10-16 10:30:00', 'Africa/Nairobi')->utc();
+
+    CollectionCase::create([
+        'loan_id'           => $this->loan->id,
+        'borrower_id'       => $this->borrower->id,
+        'dpd_bucket'        => 'DPD_1_30',
+        'case_status'       => 'closed',
+        'last_contacted_at' => null,
+    ]);
+
+    $action = $this->service->processCollectionEscalation($this->loan, $legalTime);
+
+    expect($action)->toBeNull();
+    expect(CollectionAction::count())->toBe(0);
+});
+
 it('artisan command process-collections halts safely outside legal hours', function (): void {
     // Simulate running at 22:00 EAT (10 PM)
     $this->artisan('loans:process-collections --force-hour=22')

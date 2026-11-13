@@ -18,6 +18,7 @@ final class ChartOfAccountSeeder extends Seeder
             ['2030', 'KRA Excise Duty Payable', 'LIABILITY'],
             ['4010', 'Interest Income', 'REVENUE'],
             ['4020', 'Fee Income', 'REVENUE'],
+            ['5010', 'Bad Debt Expense', 'EXPENSE'],
         ];
 
         foreach ($accounts as [$code, $name, $type]) {

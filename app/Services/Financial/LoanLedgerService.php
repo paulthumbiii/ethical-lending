@@ -16,7 +16,7 @@ final class LoanLedgerService
      * Calculates atomic point-in-time running balances under pessimistic row locking.
      *
      * @param int $loanId
-     * @param string $entryType (e.g., 'DISBURSEMENT_PRINCIPAL', 'INTEREST_ACCRUAL', 'PENALTY_CHARGED', 'REPAYMENT_CREDIT', 'WAIVER_CREDIT')
+     * @param string $entryType
      * @param string $debit Amount debited to borrower account (increases debt)
      * @param string $credit Amount credited to borrower account (decreases debt)
      * @param string $reference Transaction or external payment reference code
@@ -68,14 +68,17 @@ final class LoanLedgerService
                     break;
 
                 case 'REPAYMENT_PRINCIPAL_CREDIT':
+                case 'WRITE_OFF_PRINCIPAL_CREDIT':
                     $newPrincipal = bcsub($prevPrincipal, $credit, 2);
                     break;
 
                 case 'REPAYMENT_INTEREST_CREDIT':
+                case 'WRITE_OFF_INTEREST_CREDIT':
                     $newInterest = bcsub($prevInterest, $credit, 2);
                     break;
 
                 case 'REPAYMENT_FEES_CREDIT':
+                case 'WRITE_OFF_FEES_CREDIT':
                     $newFees = bcsub($prevFees, $credit, 2);
                     break;
 

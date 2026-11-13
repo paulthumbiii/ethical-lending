@@ -196,3 +196,75 @@ it('uses the same bucket codes as the workbench filter', function (): void {
             ->and(array_keys(CollectionsWorkbenchFilterRequest::BUCKETS))->toContain($bucket);
     }
 });
+
+it('closes an open collection case when the loan is no longer overdue', function (): void {
+    $loan = ovdLoan('010', -5); // Due in 5 days, so DPD is 0
+    $case = CollectionCase::create([
+        'loan_id'     => $loan->id,
+        'borrower_id' => $loan->borrower_id,
+        'dpd_bucket'  => 'DPD_1_30',
+        'case_status' => 'open',
+    ]);
+
+    $stats = app(OverdueDetectionService::class)->detectAll();
+
+    expect($case->fresh()->case_status)->toBe('closed')
+        ->and($stats['closed'])->toBe(1)
+        ->and(AuditTrail::where('action', 'COLLECTION_CASE_CLOSED')->count())->toBe(1);
+});
+
+it('moves the overdue bucket down when arrears decrease', function (): void {
+    $loan = ovdLoan('011', -20); // Loan maturity in future
+    $case = CollectionCase::create([
+        'loan_id'     => $loan->id,
+        'borrower_id' => $loan->borrower_id,
+        'dpd_bucket'  => 'DPD_31_60',
+        'case_status' => 'open',
+    ]);
+
+    // First instalment paid off; second instalment is only 15 days past due (DPD_1_30)
+    AmortizationSchedule::forceCreate([
+        'loan_id'               => $loan->id,
+        'installment_number'    => 1,
+        'due_date'              => CarbonImmutable::now()->subDays(45)->toDateString(),
+        'principal_due'         => '5000.00',
+        'interest_due'          => '100.00',
+        'fees_due'              => '0.00',
+        'total_installment_due' => '5100.00',
+        'status'                => 'paid',
+    ]);
+    AmortizationSchedule::forceCreate([
+        'loan_id'               => $loan->id,
+        'installment_number'    => 2,
+        'due_date'              => CarbonImmutable::now()->subDays(15)->toDateString(),
+        'principal_due'         => '5000.00',
+        'interest_due'          => '100.00',
+        'fees_due'              => '0.00',
+        'total_installment_due' => '5100.00',
+        'status'                => 'pending',
+    ]);
+
+    $stats = app(OverdueDetectionService::class)->detectAll();
+
+    expect($case->fresh()->dpd_bucket)->toBe('DPD_1_30')
+        ->and($stats['updated'])->toBe(1)
+        ->and(AuditTrail::where('action', 'COLLECTION_BUCKET_CHANGED')->where('auditable_id', $case->id)->first()->old_values['dpd_bucket'])->toBe('DPD_31_60');
+});
+
+it('reopens a closed collection case if the loan falls overdue again', function (): void {
+    $loan = ovdLoan('012', 15);
+    $case = CollectionCase::create([
+        'loan_id'     => $loan->id,
+        'borrower_id' => $loan->borrower_id,
+        'dpd_bucket'  => 'DPD_1_30',
+        'case_status' => 'closed',
+    ]);
+
+    $stats = app(OverdueDetectionService::class)->detectAll();
+
+    expect(CollectionCase::where('loan_id', $loan->id)->count())->toBe(1)
+        ->and($case->fresh()->case_status)->toBe('open')
+        ->and($case->fresh()->dpd_bucket)->toBe('DPD_1_30')
+        ->and($stats['opened'])->toBe(1)
+        ->and(AuditTrail::where('action', 'COLLECTION_CASE_OPENED')->where('auditable_id', $case->id)->first()->old_values['case_status'])->toBe('closed');
+});

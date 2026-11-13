@@ -75,16 +75,29 @@ final class OverdueDetectionService
     }
 
     /**
+     * Evaluates a loan, opening, updating, reopening or closing its collection case.
+     *
      * @return array{dpd: int, case: string, defaulted: bool}
      */
     public function processLoan(Loan $loan, ?CarbonImmutable $asOf = null): array
     {
         $dpd = $this->daysPastDue($loan, $asOf);
 
+        // 1. Loan has no arrears (settled, paid up, or back on schedule after relief).
         if ($dpd < 1) {
+            $case = CollectionCase::query()->where('loan_id', $loan->id)->first();
+
+            if ($case !== null && $case->case_status === 'open') {
+                $case->update(['case_status' => 'closed']);
+                $this->audit('COLLECTION_CASE_CLOSED', $case->id, ['case_status' => 'open'], ['case_status' => 'closed', 'days_past_due' => 0]);
+
+                return ['dpd' => 0, 'case' => 'closed', 'defaulted' => false];
+            }
+
             return ['dpd' => 0, 'case' => 'none', 'defaulted' => false];
         }
 
+        // 2. Loan has arrears (DPD >= 1).
         $bucket = self::bucketFor($dpd);
         $case = CollectionCase::query()->where('loan_id', $loan->id)->first();
         $result = 'unchanged';
@@ -100,7 +113,24 @@ final class OverdueDetectionService
             ]);
             $this->audit('COLLECTION_CASE_OPENED', $case->id, null, ['dpd_bucket' => $bucket, 'days_past_due' => $dpd]);
             $result = 'opened';
+        } elseif ($case->case_status === 'closed') {
+            // Reopen previously closed case if the borrower falls overdue again.
+            $oldBucket = $case->dpd_bucket;
+            $case->update([
+                'case_status' => 'open',
+                'dpd_bucket'  => $bucket,
+            ]);
+            $this->audit('COLLECTION_CASE_OPENED', $case->id, [
+                'case_status' => 'closed',
+                'dpd_bucket'  => $oldBucket,
+            ], [
+                'case_status'   => 'open',
+                'dpd_bucket'    => $bucket,
+                'days_past_due' => $dpd,
+            ]);
+            $result = 'reopened';
         } elseif ($case->dpd_bucket !== $bucket) {
+            // Bucket changed (moved up as time elapsed, or moved down following partial repayment).
             $old = $case->dpd_bucket;
             $case->update(['dpd_bucket' => $bucket]);
             $this->audit('COLLECTION_BUCKET_CHANGED', $case->id, ['dpd_bucket' => $old], ['dpd_bucket' => $bucket, 'days_past_due' => $dpd]);
@@ -117,18 +147,21 @@ final class OverdueDetectionService
     }
 
     /**
-     * @return array{checked: int, overdue: int, opened: int, updated: int, defaulted: int, failed: int}
+     * @return array{checked: int, overdue: int, opened: int, updated: int, closed: int, defaulted: int, failed: int}
      */
     public function detectAll(?CarbonImmutable $asOf = null): array
     {
-        $stats = ['checked' => 0, 'overdue' => 0, 'opened' => 0, 'updated' => 0, 'defaulted' => 0, 'failed' => 0];
+        $stats = ['checked' => 0, 'overdue' => 0, 'opened' => 0, 'updated' => 0, 'closed' => 0, 'defaulted' => 0, 'failed' => 0];
 
+        // Check active loan statuses, plus any loan that still has an open collection case.
         Loan::query()
-            ->whereIn('status', [
-                LoanStatus::DISBURSED->value,
-                LoanStatus::RESTRUCTURED->value,
-                LoanStatus::DEFAULTED->value,
-            ])
+            ->where(function ($query): void {
+                $query->whereIn('status', [
+                    LoanStatus::DISBURSED->value,
+                    LoanStatus::RESTRUCTURED->value,
+                    LoanStatus::DEFAULTED->value,
+                ])->orWhereHas('collectionCase', fn ($q) => $q->where('case_status', 'open'));
+            })
             ->chunkById(200, function ($loans) use (&$stats, $asOf): void {
                 foreach ($loans as $loan) {
                     $stats['checked']++;
@@ -144,11 +177,14 @@ final class OverdueDetectionService
                     if ($r['dpd'] > 0) {
                         $stats['overdue']++;
                     }
-                    if ($r['case'] === 'opened') {
+                    if ($r['case'] === 'opened' || $r['case'] === 'reopened') {
                         $stats['opened']++;
                     }
                     if ($r['case'] === 'updated') {
                         $stats['updated']++;
+                    }
+                    if ($r['case'] === 'closed') {
+                        $stats['closed']++;
                     }
                     if ($r['defaulted']) {
                         $stats['defaulted']++;

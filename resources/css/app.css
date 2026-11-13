@@ -1,13 +1,35 @@
 /* resources/css/app.css */
-@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap");
 @import "tailwindcss";
 
-@theme {
-    /* Fonts: Google Fonts first, system fonts as a fallback while loading. */
-    --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+/* 
+ * Local @font-face declarations.
+ * If .woff2 files exist in /fonts/, they load locally.
+ * Otherwise, local() checks for system installs, then falls back cleanly with font-display: swap.
+ */
+@font-face {
+    font-family: 'Plus Jakarta Sans';
+    font-style: normal;
+    font-weight: 400 800;
+    font-display: swap;
+    src: local('Plus Jakarta Sans'),
+         url('/fonts/PlusJakartaSans-Variable.woff2') format('woff2');
+}
 
-    /* Brand: navy, matching the landing page. Change these to re-theme everything. */
+@font-face {
+    font-family: 'JetBrains Mono';
+    font-style: normal;
+    font-weight: 400 700;
+    font-display: swap;
+    src: local('JetBrains Mono'),
+         url('/fonts/JetBrainsMono-Variable.woff2') format('woff2');
+}
+
+@theme {
+    /* Fonts: local/web fonts first, robust system stack fallback */
+    --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+
+    /* Brand tokens: navy palette matching the landing experience */
     --color-brand-50: #eef3fb;
     --color-brand-100: #dbe6f5;
     --color-brand-500: #3b6aa8;
@@ -16,7 +38,7 @@
     --color-brand-800: #12233d;
     --color-brand-900: #0b1220;
 
-    /* Soft blue accent: highlights on dark surfaces only, never as text on white. */
+    /* Soft blue accent: highlights on dark surfaces only */
     --color-accent-400: #93c5fd;
 
     /* Surfaces and text */
@@ -31,4 +53,50 @@
 
 [x-cloak] {
     display: none !important;
+}
+
+/* Landing CSS card fallback (displays before WebGL loads or if CDN fails) */
+.stage-fallback-wrap {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    z-index: 1;
+}
+
+.stage-fallback-card {
+    position: absolute;
+    width: 220px;
+    height: 140px;
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: 0 20px 40px rgba(11, 18, 32, 0.18), 0 1px 3px rgba(11, 18, 32, 0.1);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    transition: opacity 0.4s ease;
+}
+
+.stage-fallback-card-navy {
+    background: linear-gradient(135deg, #0b1220 0%, #1e3a5f 100%);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: #ffffff;
+    transform: translate(-30px, 20px) rotate(-6deg);
+}
+
+.stage-fallback-card-gold {
+    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    border: 1px solid rgba(147, 197, 253, 0.3);
+    color: #ffffff;
+    transform: translate(30px, -20px) rotate(8deg);
+}
+
+.stage-fallback-card .card-chip {
+    width: 28px;
+    height: 20px;
+    border-radius: 4px;
+    background: linear-gradient(135deg, #fbbf24 0%, #d97706 100%);
+    border: 1px solid #b45309;
 }

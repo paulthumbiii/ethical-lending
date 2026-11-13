@@ -20,6 +20,14 @@
         </x-slot:actions>
     </x-page-header>
 
+    @if (session('status'))
+        <div class="mb-4 rounded-lg border border-brand-500 bg-brand-50 px-4 py-3 text-sm text-brand-900" role="status">{{ session('status') }}</div>
+    @endif
+
+    @error('write_off')
+        <div class="mb-4 rounded-lg border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-800" role="alert">{{ $message }}</div>
+    @enderror
+
     <x-tabs :tabs="$tabs" :active="$tab" />
 
     @if ($tab === 'overview')
@@ -81,6 +89,56 @@
                     </ul>
                 @endif
             </x-card>
+
+            @if ($loan->status->value === 'written_off')
+                <x-card title="Write-off details" class="lg:col-span-2">
+                    @php $wo = $loan->writeOff; @endphp
+                    @if ($wo)
+                        <dl class="grid grid-cols-2 gap-4 text-sm lg:grid-cols-4">
+                            <div><dt class="text-xs text-muted">Written off on</dt><dd class="font-medium tabular-nums">{{ $date($wo->written_off_at) }}</dd></div>
+                            <div><dt class="text-xs text-muted">Total written off</dt><dd class="font-medium tabular-nums text-rose-700">{{ $money($wo->total_written_off) }}</dd></div>
+                            <div><dt class="text-xs text-muted">Approved by</dt><dd class="font-medium">{{ $wo->approver?->name ?? 'Staff' }}</dd></div>
+                            <div><dt class="text-xs text-muted">Reason</dt><dd class="font-medium">{{ $wo->write_off_reason }}</dd></div>
+                        </dl>
+                        <div class="mt-3 border-t border-line pt-2 text-xs text-muted">
+                            Principal: {{ $money($wo->written_off_principal) }} &bull; Interest: {{ $money($wo->written_off_interest) }} &bull; Fees: {{ $money($wo->written_off_fees) }}
+                        </div>
+                    @else
+                        <p class="text-sm text-muted">This loan is marked written off.</p>
+                    @endif
+                </x-card>
+            @elseif ($loan->status->value === 'defaulted')
+                @php
+                    $pendingWo = \App\Models\MakerCheckerRequest::query()
+                        ->where('action_type', 'WRITE_OFF_LOAN')
+                        ->where('target_entity_type', \App\Models\Loan::class)
+                        ->where('target_entity_id', $loan->id)
+                        ->where('status', 'pending')
+                        ->first();
+                @endphp
+                <x-card title="Loan write-off" class="lg:col-span-2">
+                    @if ($pendingWo)
+                        <div class="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                            <p class="font-medium">Write-off request #{{ $pendingWo->id }} is pending checker review on the Review Desk.</p>
+                            <p class="mt-1 text-xs text-amber-700">Proposed by {{ $pendingWo->maker?->name ?? 'Staff' }} with reason: "{{ $pendingWo->payload['reason'] ?? '' }}". Escalation pauses until approved or rejected.</p>
+                        </div>
+                    @else
+                        <p class="text-sm text-muted">When a defaulted loan is unrecoverable, an authorized staff member can propose a write-off. Dual-control governance requires a separate checker on the Review Desk to approve before debts are cleared from the balance sheet.</p>
+                        <form method="POST" action="{{ route('lender.loans.write-off', $loan) }}" class="mt-4 space-y-3"
+                              x-on:submit="if (! confirm('Submit this loan for write-off review? A checker must review and approve it on the Review Desk.')) $event.preventDefault()">
+                            @csrf
+                            <div>
+                                <label for="wo-reason" class="block text-xs font-medium text-muted">Reason for write-off</label>
+                                <input id="wo-reason" name="reason" type="text" placeholder="e.g. Unrecoverable after Section 44A cap reached; borrower untraceable" required
+                                       class="mt-1 w-full rounded-md border border-line bg-white px-3 py-2 text-sm focus:border-brand-600 focus:outline-none">
+                            </div>
+                            <div class="flex justify-end">
+                                <x-button type="submit" variant="secondary">Submit write-off request</x-button>
+                            </div>
+                        </form>
+                    @endif
+                </x-card>
+            @endif
         </div>
     @elseif ($tab === 'ledger')
         <x-data-table :headings="['When', 'Type', 'Debit', 'Credit', 'Principal', 'Interest', 'Fees', 'Total', 'Reference']"

@@ -5,9 +5,11 @@ declare(strict_types=1);
 namespace App\Services\Governance;
 
 use App\Models\AuditTrail;
+use App\Models\Loan;
 use App\Models\LoanApplication;
 use App\Models\MakerCheckerRequest;
 use App\Services\Customer\BorrowerNotificationService;
+use App\Services\Servicing\LoanWriteOffService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
@@ -63,7 +65,6 @@ final class MakerCheckerService
             }
 
             // Dual-Control Requirement: Checker MUST NOT be the Maker.
-            // Compared as integers so a driver that returns ids as strings cannot slip past the check.
             if ((int) $request->maker_user_id === $checkerUserId) {
                 Log::channel('fintech')->warning("Dual-Control Violation Attempt: User #{$checkerUserId} attempted self-approval on Request #{$requestId}");
                 throw new RuntimeException("Dual-Control Violation: You cannot authorize a request you initiated.");
@@ -78,6 +79,15 @@ final class MakerCheckerService
 
                 if ($application === null || $application->status !== self::APPLICATION_AWAITING_STATUS) {
                     throw new RuntimeException('This application is no longer waiting for final approval.');
+                }
+            } elseif ($request->action_type === 'WRITE_OFF_LOAN') {
+                $loan = Loan::where('id', $request->target_entity_id)
+                    ->lockForUpdate()
+                    ->first();
+
+                if ($loan !== null) {
+                    $reason = $checkerNotes ?: ($request->payload['reason'] ?? 'Write-off approved');
+                    app(LoanWriteOffService::class)->execute($loan, $checkerUserId, $reason);
                 }
             }
 
@@ -138,9 +148,6 @@ final class MakerCheckerService
 
     /**
      * Rejects a pending dual-control request and records the decision on the audit trail.
-     * A rejected loan-application request also closes the application, so it is never left hanging.
-     *
-     * @return array<string, mixed>
      */
     public function rejectRequest(int $requestId, int $checkerUserId, string $reason): array
     {
